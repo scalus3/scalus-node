@@ -3,11 +3,13 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 import com.github.luben.zstd.ZstdInputStream
 import com.github.plokhotnyuk.jsoniter_scala.core.{readFromString, JsonValueCodec}
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import scalus.utils.Hex.toHex
 
 import java.io.InputStream
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.file.{Files, Path, StandardCopyOption}
+import java.security.{DigestInputStream, MessageDigest}
 import java.time.Duration
 import java.util.concurrent.Semaphore
 import scala.concurrent.{ExecutionContext, Future}
@@ -64,6 +66,20 @@ final class MithrilClient private (
         withHashArg("mithrilclient_get_cardano_database_v2", hash)
             .flatMap(asyncRuntime.awaitPromise(_)(optionalJsonDecode[CardanoDatabaseV2Metadata]))
 
+    /** `mithrilclient_verify_certificate_chain` — walks the certificate chain back to the genesis
+      * verification key (MuSig2 threshold-signature checks at each hop) and returns the verified
+      * leaf certificate. A failed walk surfaces as a Future failure carrying the WASM error string;
+      * no certificate is returned in that case.
+      *
+      * The returned certificate's `signedMessage` is a SHA-256 of its `protocolMessage.messageParts`
+      * computed via [[ProtocolMessageHash]] — re-deriving it locally with our own merkle root in
+      * place of the aggregator's is what proves snapshot authenticity (see
+      * [[CardanoDatabaseVerifier]]).
+      */
+    def verifyCertificateChain(hash: String): Future[MithrilCertificateMessage] =
+        withHashArg("mithrilclient_verify_certificate_chain", hash)
+            .flatMap(asyncRuntime.awaitPromise(_)(jsonDecode[MithrilCertificateMessage]))
+
     /** Download one `immutable-{N}.tar.zst` file named by `meta.immutables.locations`, expand it
       * under `destDir` (which must exist), and return the paths of extracted files. Currently picks
       * the first `CloudStorage` location with a non-empty `Template` URI.
@@ -74,7 +90,7 @@ final class MithrilClient private (
         destDir: Path
     ): Future[Seq[Path]] = Future {
         val url = immutableUrl(meta, immutableFileNumber)
-        httpGetStream(url) { in => extractTarZst(in, destDir) }
+        httpGetStream(url) { in => extractTarZst(in, destDir).paths }
     }
 
     /** Bulk-download the full Cardano Database V2 artifact referenced by `meta`: every
@@ -146,14 +162,19 @@ final class MithrilClient private (
                 finally sem.release()
             }
         }
-        Future.sequence(perJob).map { written =>
-            val byStage = allJobs.zip(written).toMap
+        Future.sequence(perJob).map { extracted =>
+            val byStage = allJobs.zip(extracted).toMap
+            // Inline-computed digests across every fresh-extracted file. Resumed archives (those
+            // whose .extracted marker fired) contribute nothing to this map; the verifier falls
+            // back to a disk read for those filenames.
+            val inline = extracted.foldLeft(Map.empty[String, String])(_ ++ _.digests)
             MithrilClient.CardanoDatabaseV2Layout(
               root = destDir,
               immutableRange = (range.start, range.end),
-              immutableFiles = immutableJobs.flatMap(byStage(_)),
-              ancillaryFiles = ancillaryJob.map(byStage(_)).getOrElse(Seq.empty),
-              digestsFiles = digestsJob.map(byStage(_)).getOrElse(Seq.empty)
+              immutableFiles = immutableJobs.flatMap(byStage(_).paths),
+              ancillaryFiles = ancillaryJob.map(byStage(_).paths).getOrElse(Seq.empty),
+              digestsFiles = digestsJob.map(byStage(_).paths).getOrElse(Seq.empty),
+              inlineDigests = inline
             )
         }
     }
@@ -199,16 +220,16 @@ final class MithrilClient private (
         job: MithrilClient.ArchiveJob,
         destDir: Path,
         onProgress: MithrilClient.DownloadProgress => Unit
-    ): Seq[Path] = {
+    ): MithrilClient.ExtractedFiles = {
         val markerName = job.stage + ".extracted"
         val marker = destDir.resolve(markerName)
         if Files.exists(marker) then {
             onProgress(
               MithrilClient.DownloadProgress(job.stage, 0L, job.advertisedSize, skipped = true)
             )
-            return Seq.empty
+            return MithrilClient.ExtractedFiles.empty
         }
-        val written = httpGetStream(job.url) { in => extractTarZst(in, destDir) }
+        val extracted = httpGetStream(job.url) { in => extractTarZst(in, destDir) }
         Files.writeString(marker, job.url)
         onProgress(
           MithrilClient.DownloadProgress(
@@ -218,7 +239,7 @@ final class MithrilClient private (
             skipped = false
           )
         )
-        written
+        extracted
     }
 
     private def httpGetStream[T](url: String)(f: InputStream => T): T = {
@@ -249,11 +270,17 @@ final class MithrilClient private (
         finally body.close()
     }
 
-    private def extractTarZst(in: InputStream, destDir: Path): Seq[Path] = {
+    private def extractTarZst(in: InputStream, destDir: Path): MithrilClient.ExtractedFiles = {
         Files.createDirectories(destDir)
         val written = scala.collection.mutable.ArrayBuffer.empty[Path]
+        val digests = scala.collection.mutable.Map.empty[String, String]
         val zin = new ZstdInputStream(in)
         val tin = new TarArchiveInputStream(zin)
+        // One digest instance reused across entries via reset() — saves per-entry allocation.
+        // The DigestInputStream wraps `tin` so reads through it (via Files.copy) accumulate the
+        // digest of the bytes Files.copy actually consumed for this entry.
+        val digest = MessageDigest.getInstance("SHA-256")
+        val digestIn = new DigestInputStream(tin, digest)
         try {
             var e = tin.getNextEntry
             while e != null do {
@@ -261,7 +288,9 @@ final class MithrilClient private (
                     val rel = sanitiseTarName(e.getName)
                     val out = destDir.resolve(rel)
                     Files.createDirectories(out.getParent)
-                    Files.copy(tin, out, StandardCopyOption.REPLACE_EXISTING)
+                    digest.reset()
+                    Files.copy(digestIn, out, StandardCopyOption.REPLACE_EXISTING)
+                    digests.update(out.getFileName.toString, digest.digest().toHex)
                     written += out
                 }
                 e = tin.getNextEntry
@@ -270,7 +299,7 @@ final class MithrilClient private (
             tin.close()
             zin.close()
         }
-        written.toSeq
+        MithrilClient.ExtractedFiles(written.toSeq, digests.toMap)
     }
 
     /** Reject absolute / parent-escape entries — a cardano-node immutable tar should only ever
@@ -323,15 +352,31 @@ object MithrilClient {
       * **omitted** from these lists — the `.extracted` marker skips re-materialisation and we don't
       * pay the cost of re-walking the tar just to rebuild the path list. Callers that need the full
       * on-disk inventory should scan `root` directly.
+      *
+      * @param inlineDigests
+      *   `filename → SHA-256 hex` for every file extracted in *this* run. Resumed archives
+      *   contribute nothing — verifiers must fall back to a disk read for filenames missing from
+      *   this map. See [[scalus.cardano.node.stream.engine.snapshot.immutabledb.DigestsVerifier]].
       */
     final case class CardanoDatabaseV2Layout(
         root: Path,
         immutableRange: (Long, Long),
         immutableFiles: Seq[Path],
         ancillaryFiles: Seq[Path],
-        digestsFiles: Seq[Path]
+        digestsFiles: Seq[Path],
+        inlineDigests: Map[String, String] = Map.empty
     ) {
         def immutableCount: Long = immutableRange._2 - immutableRange._1 + 1
+    }
+
+    /** Per-archive extraction result — paths plus inline-computed SHA-256 digests, keyed by
+      * filename (not full path). The filename matches what the digests manifest uses, so the
+      * verifier can look these up directly without a disk re-read.
+      */
+    final case class ExtractedFiles(paths: Seq[Path], digests: Map[String, String])
+
+    object ExtractedFiles {
+        val empty: ExtractedFiles = ExtractedFiles(Seq.empty, Map.empty)
     }
 
     /** Selects which immutable chunks of a snapshot to pull. Mirrors upstream Mithril's

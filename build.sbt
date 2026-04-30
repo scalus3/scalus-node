@@ -190,6 +190,10 @@ lazy val scalusChainStoreMithril = project
       libraryDependencies += "org.apache.commons" % "commons-compress" % "1.28.0",
       libraryDependencies += "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-core" % "2.38.9",
       libraryDependencies += "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros" % "2.38.9",
+      // Blake2s256 — used by the Mithril Merkle tree (MMR) for cardano-database snapshot
+      // verification. BouncyCastle's lightweight `Blake2sDigest` class is enough; we don't need
+      // the JCA provider registration.
+      libraryDependencies += "org.bouncycastle" % "bcprov-jdk18on" % "1.78",
       libraryDependencies += "org.scalatest" %% "scalatest" % scalatestVersion % "test",
       publish / skip := false
     )

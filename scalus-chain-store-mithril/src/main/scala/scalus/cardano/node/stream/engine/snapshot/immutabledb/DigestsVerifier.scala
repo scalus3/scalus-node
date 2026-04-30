@@ -101,11 +101,20 @@ object DigestsVerifier {
     /** Load a manifest discovered under `dir` via [[loadManifestFromDir]]. */
     def loadManifestAt(dir: Path): DigestManifest = loadManifest(loadManifestFromDir(dir))
 
-    /** Hash every file under `immutableDir` and compare against the manifest. Returns a structured
-      * result so callers can decide how to surface partial failure (some apps tolerate a
-      * tail-missing chunk because a concurrent run was still extracting).
+    /** Verify the manifest against an in-memory `filename → sha256-hex` cache, falling back to a
+      * disk read for any filename missing from the cache. The cache is what
+      * [[scalus.cardano.node.stream.engine.snapshot.mithril.MithrilClient.CardanoDatabaseV2Layout]]
+      * publishes after a fresh extraction — every immutable file gets a digest computed inline
+      * during tar-zst expansion, eliminating a second pass over the (multi-GB) data on disk.
+      *
+      * Resumed archives (those whose `.extracted` marker shortcut fired) contribute nothing to
+      * the cache, so this method still re-reads them from `immutableDir`.
       */
-    def verify(immutableDir: Path, manifest: DigestManifest): VerificationResult = {
+    def verifyWithCache(
+        immutableDir: Path,
+        manifest: DigestManifest,
+        cache: Map[String, String]
+    ): VerificationResult = {
         import scala.jdk.CollectionConverters.*
         val mismatches = collection.mutable.ArrayBuffer.empty[Mismatch]
         val onDisk = collection.mutable.Set.empty[String]
@@ -117,7 +126,7 @@ object DigestsVerifier {
                     onDisk += name
                     manifest.get(name) match {
                         case Some(expected) =>
-                            val actual = sha256Hex(p)
+                            val actual = cache.getOrElse(name, sha256Hex(p))
                             if !actual.equalsIgnoreCase(expected) then
                                 mismatches += Mismatch(name, expected, actual)
                             else verified += 1
@@ -130,6 +139,13 @@ object DigestsVerifier {
         val unexpected = onDisk.diff(manifest.entries.keySet).toVector.sorted
         VerificationResult(verified, mismatches.toSeq, missing, unexpected)
     }
+
+    /** Hash every file under `immutableDir` and compare against the manifest. Returns a structured
+      * result so callers can decide how to surface partial failure (some apps tolerate a
+      * tail-missing chunk because a concurrent run was still extracting).
+      */
+    def verify(immutableDir: Path, manifest: DigestManifest): VerificationResult =
+        verifyWithCache(immutableDir, manifest, Map.empty)
 
     /** Hex-encoded SHA-256 of a file, streamed in 64 KB blocks so we don't peak memory on large
       * chunk files (~2 MB uncompressed is typical, but defensible across sizes).
