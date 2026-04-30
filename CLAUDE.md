@@ -11,9 +11,10 @@ Two convenience aggregates exist on top of the per-module projects:
 - `js`  — every JS-side of cross modules (no native deps).
 
 ```
-sbt jvm/compile                     # compile all JVM modules
-sbt jvm/test                        # run all JVM unit tests
-sbt js/compile                      # compile all JS modules
+sbt jvm/compile                     # compile the `jvm` aggregate (published JVM modules)
+sbt jvm/test                        # run tests for the `jvm` aggregate (published JVM modules)
+sbt 'scalus-cardano-network-it/test' # run the `scalus-cardano-network-it` integration-test suite explicitly
+sbt js/compile                      # compile the `js` aggregate
 sbt scalafmtAll scalafmtSbt         # format sources + build.sbt
 sbt compileAll                      # alias: format + compile (Test) + testQuick
 sbt testAll                         # alias: clean + format + compile + full test
