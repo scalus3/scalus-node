@@ -183,6 +183,7 @@ lazy val scalusChainStoreMithril = project
     .settings(
       name := "scalus-chain-store-mithril",
       scalacOptions ++= commonScalacOptions,
+      libraryDependencies += "io.github.dotty-cps-async" %% "dotty-cps-async" % "1.3.2",
       libraryDependencies += "com.dylibso.chicory" % "runtime" % "1.7.0",
       libraryDependencies += "com.dylibso.chicory" % "wasi" % "1.7.0",
       libraryDependencies += "com.github.luben" % "zstd-jni" % "1.5.6-3",
@@ -216,7 +217,7 @@ lazy val scalusCardanoNetwork = crossProject(JSPlatform, JVMPlatform)
       name := "scalus-cardano-network",
       scalacOptions ++= commonScalacOptions,
       libraryDependencies += "org.scalus" %%% "scalus-cardano-ledger" % scalusVersion,
-      libraryDependencies += "io.github.dotty-cps-async" %%% "dotty-cps-async" % "1.3.1",
+      libraryDependencies += "io.github.dotty-cps-async" %%% "dotty-cps-async" % "1.3.2",
       libraryDependencies += "org.scalatest" %%% "scalatest" % scalatestVersion % "test",
       libraryDependencies += "org.scalatestplus" %%% "scalacheck-1-18" % scalatestPlusScalacheckVersion % "test",
       publish / skip := false
