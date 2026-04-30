@@ -10,10 +10,21 @@ import java.nio.file.Files
 import java.security.{DigestInputStream, MessageDigest}
 import scala.concurrent.{ExecutionContext, Future}
 
-import ChainStoreSnapshot.{Header, Record}
+import ChainStoreSnapshot.Record
 
-/** Drives a cold-start bootstrap: resolve a [[SnapshotSource]] to a byte stream, decode it via
-  * [[SnapshotReader]], and populate a [[ChainStore]] (and its optional [[ChainStoreUtxoSet]]).
+/** Drives a cold-start bootstrap: resolve a [[SnapshotSource]] to a populated [[ChainStore]]
+  * (and its optional [[ChainStoreUtxoSet]]).
+  *
+  * Two restore shapes coexist:
+  *
+  *   - **Streaming-CBOR** ([[SnapshotSource.File]] / [[SnapshotSource.Url]]) drives
+  *     [[SnapshotReader]] over the Scalus-native interchange format defined in M10.P1. One
+  *     record at a time, never materialised in full.
+  *   - **Mithril dir-restore** ([[SnapshotSource.Mithril]] / [[SnapshotSource.MithrilDir]])
+  *     delegates to a [[MithrilSnapshotResolver]] discovered via `ServiceLoader` from
+  *     `scalus-chain-store-mithril`. The resolver knows how to download + verify a cardano-node
+  *     V2 artefact, unpack ImmutableDB chunks + the ledger-state, and populate the store via
+  *     the same `appendBlock` / `restoreUtxoSet` calls.
   *
   * Used by the Fs2 / Ox providers at construction time when `config.bootstrap` is set and the
   * engine has no warm-restart tip. See `docs/local/claude/indexer/snapshot-bootstrap-m10.md` for
@@ -29,45 +40,89 @@ final class ChainStoreRestorer(store: ChainStore) {
     /** Restore `source` into `store`. Returns the snapshot's tip on success; fails the Future with
       * [[SnapshotError]] on corruption / unsupported sources / I/O failure.
       */
-    def restore(source: SnapshotSource)(using ExecutionContext): Future[ChainTip] =
-        Future(acquireStream(source)).map { case (in, expectedSha256) =>
-            // Wrap with DigestInputStream so Url's expectedSha256 can be cross-checked after
-            // the reader has drained the body.
-            val digest = MessageDigest.getInstance("SHA-256")
-            val wrapped = new DigestInputStream(new BufferedInputStream(in), digest)
-            try {
-                val tip = runRestore(wrapped)
-                expectedSha256.foreach { expected =>
-                    val got = digest.digest()
-                    if !java.util.Arrays.equals(got, expected.bytes) then
-                        throw SnapshotError.SnapshotCorrupted(
-                          "url sha256 mismatch: downloaded snapshot does not match " +
-                              "expectedSha256"
-                        )
-                }
-                tip
-            } finally wrapped.close()
-        }
+    def restore(source: SnapshotSource)(using ExecutionContext): Future[ChainTip] = source match {
+        case f: SnapshotSource.File       => streamRestore(f.path, expectedSha256 = None)
+        case u: SnapshotSource.Url        => urlRestore(u)
+        case m: SnapshotSource.Mithril    => mithrilRestore(m)
+        case d: SnapshotSource.MithrilDir => mithrilDirRestore(d)
+    }
 
     // ------------------------------------------------------------------
-    // Internal helpers.
+    // Streaming CBOR (File / Url) — the M10.P1 path.
     // ------------------------------------------------------------------
 
-    /** Return (stream, optional expected sha256 to verify after reading). */
-    private def acquireStream(source: SnapshotSource): (InputStream, Option[ByteString]) =
-        source match {
-            case SnapshotSource.File(path) =>
-                (Files.newInputStream(path), None)
-            case SnapshotSource.Url(url, expectedSha256) =>
-                val conn = new java.net.URI(url).toURL.openConnection()
-                conn.setConnectTimeout(30_000)
-                conn.setReadTimeout(60_000)
-                (conn.getInputStream, expectedSha256)
-            case _: SnapshotSource.Mithril =>
-                throw UnsupportedSourceException(
-                  "SnapshotSource.Mithril is a stub in M10 — parser lands with M10b, verifier " +
-                      "with M10c; see docs/local/claude/indexer/indexer-node.md"
+    private def streamRestore(
+        path: java.nio.file.Path,
+        expectedSha256: Option[ByteString]
+    )(using ExecutionContext): Future[ChainTip] =
+        Future(Files.newInputStream(path)).map(in => runStream(in, expectedSha256))
+
+    private def urlRestore(u: SnapshotSource.Url)(using ExecutionContext): Future[ChainTip] =
+        Future {
+            val conn = new java.net.URI(u.url).toURL.openConnection()
+            conn.setConnectTimeout(30_000)
+            conn.setReadTimeout(60_000)
+            conn.getInputStream
+        }.map(in => runStream(in, u.expectedSha256))
+
+    private def runStream(in: InputStream, expectedSha256: Option[ByteString]): ChainTip = {
+        // Wrap with DigestInputStream so Url's expectedSha256 can be cross-checked after the
+        // reader has drained the body.
+        val digest = MessageDigest.getInstance("SHA-256")
+        val wrapped = new DigestInputStream(new BufferedInputStream(in), digest)
+        try {
+            val tip = runRestore(wrapped)
+            expectedSha256.foreach { expected =>
+                val got = digest.digest()
+                if !java.util.Arrays.equals(got, expected.bytes) then
+                    throw SnapshotError.SnapshotCorrupted(
+                      "url sha256 mismatch: downloaded snapshot does not match expectedSha256"
+                    )
+            }
+            tip
+        } finally wrapped.close()
+    }
+
+    // ------------------------------------------------------------------
+    // Mithril dir-restore — SPI dispatch into scalus-chain-store-mithril.
+    // ------------------------------------------------------------------
+
+    private def mithrilRestore(
+        m: SnapshotSource.Mithril
+    )(using ExecutionContext): Future[ChainTip] = withResolver { (resolver, store) =>
+        resolver.restore(m, store)
+    }
+
+    private def mithrilDirRestore(
+        d: SnapshotSource.MithrilDir
+    )(using ExecutionContext): Future[ChainTip] = withResolver { (resolver, store) =>
+        resolver.restoreDir(d, store)
+    }
+
+    private def withResolver(
+        body: (MithrilSnapshotResolver, ChainStore & ChainStoreUtxoSet) => Future[ChainTip]
+    )(using ExecutionContext): Future[ChainTip] =
+        utxoSet match {
+            case None =>
+                Future.failed(
+                  SnapshotError.SnapshotConfigError(
+                    "Mithril snapshot restore requires a ChainStore that implements " +
+                        "ChainStoreUtxoSet — the Mithril V2 artefact contains a ledger state " +
+                        "the resolver bulk-loads via restoreUtxoSet"
+                  )
                 )
+            case Some(u) =>
+                MithrilSnapshotResolver.find() match {
+                    case None =>
+                        Future.failed(
+                          UnsupportedSourceException(
+                            "no MithrilSnapshotResolver registered — add the " +
+                                "scalus-chain-store-mithril module to the classpath. " +
+                                "See docs/local/claude/indexer/indexer-node.md M10b."
+                          )
+                        )
+                    case Some(r) => body(r, store.asInstanceOf[ChainStore & ChainStoreUtxoSet])
+                }
         }
 
     /** Drive the reader: stream blocks into `appendBlock`, stream UTxO entries into

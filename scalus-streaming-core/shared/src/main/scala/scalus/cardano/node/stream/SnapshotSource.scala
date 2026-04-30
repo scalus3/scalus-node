@@ -27,10 +27,41 @@ object SnapshotSource {
       */
     case class Url(url: String, expectedSha256: Option[ByteString] = None) extends SnapshotSource
 
-    /** Mithril aggregator source. Ships as a stub in M10 — the full cryptographic verifier
-      * (certificate chain, MuSig2 threshold signatures, tarball parsing) lands with M10b in
-      * `scalus-chain-store-mithril`. Using this variant today raises [[UnsupportedSourceException]]
-      * at provider-construction time.
+    /** Mithril aggregator source. Resolved at provider-construction time by an SPI implementation
+      * loaded from the classpath (see [[engine.snapshot.MithrilSnapshotResolver]] — `META-INF`
+      * service registration in `scalus-chain-store-mithril`). When the SPI is not on the
+      * classpath, raises [[UnsupportedSourceException]].
+      *
+      * @param aggregatorUrl
+      *   Mithril aggregator endpoint, e.g.
+      *   `https://aggregator.testing-preview.api.mithril.network/aggregator`.
+      * @param genesisVerificationKey
+      *   hex-encoded genesis verification key for the target network.
+      * @param workDir
+      *   stable on-disk location for the downloaded V2 artefact. Must be a directory the resolver
+      *   can write to; resumable across restarts via the `.extracted` markers the downloader
+      *   leaves behind. Required (no default) because the artefact is multi-GB and a tmp-dir
+      *   default would silently re-download on every start.
+      * @param immutableFileRange
+      *   `Some((from, to))` (inclusive 1-based) restricts which immutable chunks the resolver pulls;
+      *   `None` means "all chunks the aggregator advertises". Useful when the CDN retains only a
+      *   rolling window (e.g. testing-preview keeps ~15K most-recent chunks).
+      * @param snapshotHash
+      *   pin a specific signed snapshot by hash; `None` picks the aggregator's latest.
       */
-    case class Mithril(aggregatorUrl: String, genesisVerificationKey: String) extends SnapshotSource
+    case class Mithril(
+        aggregatorUrl: String,
+        genesisVerificationKey: String,
+        workDir: Path,
+        immutableFileRange: Option[(Long, Long)] = None,
+        snapshotHash: Option[String] = None
+    ) extends SnapshotSource
+
+    /** Already-extracted cardano-node snapshot directory — `<dir>/immutable/` and
+      * `<dir>/ledger/<slot>/`. Skips the download + cryptographic verification entirely; useful
+      * when the snapshot was acquired via an external pipeline (own signed bundle, mithril-client
+      * CLI, CI fixture). Resolved by the same SPI as [[Mithril]] (the dir-restore path is the
+      * common code).
+      */
+    case class MithrilDir(path: Path) extends SnapshotSource
 }
