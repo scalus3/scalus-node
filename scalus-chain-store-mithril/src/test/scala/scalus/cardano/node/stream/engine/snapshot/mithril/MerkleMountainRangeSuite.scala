@@ -37,35 +37,53 @@ final class MerkleMountainRangeSuite extends AnyFunSuite {
         assert(MerkleMountainRange.computeRoot(leaves).toSeq == expected.toSeq)
     }
 
-    test("three leaves: bag-the-peaks combines a height-1 and a height-0 right-to-left") {
+    test("three leaves: bag combines [P_1 (h=1), P_0 (h=0)] via H(acc, left)") {
+        // ckb's bagging starts at the rightmost peak (P_0) and merges in each leftward peak via
+        // H(acc, left). For 3 leaves: peaks = [P_1, P_0]; acc = P_0; acc = H(P_0, P_1).
         val leaves = Seq("aa", "bb", "cc").map(_.getBytes(US_ASCII))
         val p1 = manualBlake2s256(leaves(0), leaves(1))
         val p0 = leaves(2)
-        val expected = manualBlake2s256(p1, p0)
+        val expected = manualBlake2s256(p0, p1)
         assert(MerkleMountainRange.computeRoot(leaves).toSeq == expected.toSeq)
     }
 
-    test("five leaves: bag right-to-left of [P_2 (h=2), P_0 (h=0)]") {
-        // 5 = 0b101 → two surviving peaks of heights {2, 0}.
+    test("five leaves: peaks {h=2, h=0} bagged via H(acc, left)") {
+        // 5 = 0b101 → peaks [P_2, P_0]; acc = P_0; acc = H(P_0, P_2).
         val leaves = Seq("aa", "bb", "cc", "dd", "ee").map(_.getBytes(US_ASCII))
         val q1a = manualBlake2s256(leaves(0), leaves(1))
         val q1b = manualBlake2s256(leaves(2), leaves(3))
         val p2 = manualBlake2s256(q1a, q1b)
         val p0 = leaves(4)
-        val expected = manualBlake2s256(p2, p0)
+        val expected = manualBlake2s256(p0, p2)
         assert(MerkleMountainRange.computeRoot(leaves).toSeq == expected.toSeq)
     }
 
-    test("seven leaves: peaks {h=2, h=1, h=0} bagged right-to-left") {
-        // 7 = 0b111
+    test("seven leaves: peaks {h=2, h=1, h=0} bagged via H(acc, left) walking right-to-left") {
+        // 7 = 0b111 → peaks [P_2, P_1, P_0]; walk right-to-left:
+        //   acc = P_0
+        //   acc = H(P_0, P_1)
+        //   acc = H(H(P_0, P_1), P_2)
         val ls = Seq("a", "b", "c", "d", "e", "f", "g").map(_.getBytes(US_ASCII))
         val q1a = manualBlake2s256(ls(0), ls(1))
         val q1b = manualBlake2s256(ls(2), ls(3))
         val p2 = manualBlake2s256(q1a, q1b)
         val p1 = manualBlake2s256(ls(4), ls(5))
         val p0 = ls(6)
-        val expected = manualBlake2s256(p2, manualBlake2s256(p1, p0))
+        val step1 = manualBlake2s256(p0, p1)
+        val expected = manualBlake2s256(step1, p2)
         assert(MerkleMountainRange.computeRoot(ls).toSeq == expected.toSeq)
+    }
+
+    /** Lifted verbatim from `mithril-common/src/crypto_helper/merkle_tree.rs::test_golden_merkle_root`.
+      * If our MMR matches upstream's `MKTree`, this hex must match byte-for-byte.
+      */
+    test("upstream golden vector: leaves=[golden-1..golden-5]") {
+        val leaves = Seq("golden-1", "golden-2", "golden-3", "golden-4", "golden-5")
+            .map(_.getBytes(US_ASCII))
+        val expectedHex =
+            "3bbced153528697ecde7345a22e50115306478353619411523e804f2323fd921"
+        val rootHex = bytesToHex(MerkleMountainRange.computeRoot(leaves))
+        assert(rootHex == expectedHex, s"\nexpected: $expectedHex\nactual:   $rootHex")
     }
 
     test("computeRoot is deterministic across runs") {
@@ -94,5 +112,17 @@ final class MerkleMountainRangeSuite extends AnyFunSuite {
         val out = new Array[Byte](32)
         d.doFinal(out, 0)
         out
+    }
+
+    private def bytesToHex(bs: Array[Byte]): String = {
+        val sb = new java.lang.StringBuilder(bs.length * 2)
+        var i = 0
+        while i < bs.length do {
+            val b = bs(i) & 0xff
+            sb.append(Character.forDigit((b >>> 4) & 0xf, 16))
+            sb.append(Character.forDigit(b & 0xf, 16))
+            i += 1
+        }
+        sb.toString
     }
 }

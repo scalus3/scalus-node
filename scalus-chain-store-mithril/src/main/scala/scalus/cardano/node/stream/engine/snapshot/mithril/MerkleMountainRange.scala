@@ -49,12 +49,17 @@ object MerkleMountainRange {
         bagPeaksRightToLeft(peaks.toSeq.map(_._2))
     }
 
+    /** Bag peaks the way `ckb-merkle-mountain-range::bagging_peaks_hashes` does: start with the
+      * rightmost peak as the accumulator, then walk right-to-left merging in each remaining peak
+      * with the **accumulator first** in the hash input — `H(acc || left_peak)`, not the
+      * `H(left_peak || acc)` you'd get from a naïve "fold-from-the-right" reading.
+      */
     private def bagPeaksRightToLeft(peaks: Seq[Array[Byte]]): Array[Byte] = {
         require(peaks.nonEmpty)
         var acc = peaks.last
         var i = peaks.length - 2
         while i >= 0 do {
-            acc = blake2s256(peaks(i), acc)
+            acc = blake2s256(acc, peaks(i))
             i -= 1
         }
         acc
