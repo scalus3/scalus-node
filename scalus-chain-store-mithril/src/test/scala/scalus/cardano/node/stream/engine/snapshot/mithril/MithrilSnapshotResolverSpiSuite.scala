@@ -91,6 +91,53 @@ final class MithrilSnapshotResolverSpiSuite extends AnyFunSuite with ScalaFuture
         } finally Files.deleteIfExists(tmp)
     }
 
+    test("Mithril source with invalid immutableFileRange fails with SnapshotConfigError") {
+        val workDir = Files.createTempDirectory("mithril-range-test-")
+        try {
+            val resolver = new MithrilSnapshotResolverImpl()
+            val store    = new KvChainStore(InMemoryKvStore())
+            try {
+                // from > to is invalid
+                val causeFromGtTo = resolver
+                    .restore(
+                      SnapshotSource.Mithril(
+                        aggregatorUrl = "https://example.com",
+                        genesisVerificationKey = "key",
+                        workDir = workDir,
+                        immutableFileRange = Some((5L, 3L))
+                      ),
+                      store
+                    )
+                    .failed
+                    .futureValue
+                assert(
+                  causeFromGtTo.isInstanceOf[
+                    scalus.cardano.node.stream.engine.snapshot.SnapshotError.SnapshotConfigError
+                  ]
+                )
+
+                // from == 0 is invalid (must be >= 1)
+                val causeZeroFrom = resolver
+                    .restore(
+                      SnapshotSource.Mithril(
+                        aggregatorUrl = "https://example.com",
+                        genesisVerificationKey = "key",
+                        workDir = workDir,
+                        immutableFileRange = Some((0L, 5L))
+                      ),
+                      store
+                    )
+                    .failed
+                    .futureValue
+                assert(
+                  causeZeroFrom.isInstanceOf[
+                    scalus.cardano.node.stream.engine.snapshot.SnapshotError.SnapshotConfigError
+                  ]
+                )
+            } finally store.close()
+        } finally Files.deleteIfExists(workDir)
+    }
+
     // -----------------------------------------------------------------------
     // Fixture helpers — duplicate of SnapshotDirRestorerSuite's; kept local because the two
     // suites live in different packages and these are short.

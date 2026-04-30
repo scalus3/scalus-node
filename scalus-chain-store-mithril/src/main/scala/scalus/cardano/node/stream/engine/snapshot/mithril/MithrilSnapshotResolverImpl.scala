@@ -33,24 +33,37 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
     def restore(
         source: SnapshotSource.Mithril,
         store: ChainStore & ChainStoreUtxoSet
-    )(using ExecutionContext): Future[ChainTip] = Future {
-        val client = MithrilClient.create(source.aggregatorUrl, source.genesisVerificationKey)
-        try {
-            val meta = pickSnapshotMeta(client, source.snapshotHash)
-            Files.createDirectories(source.workDir)
-            val range = source.immutableFileRange match {
-                case None         => MithrilClient.ImmutableFileRange.Full
-                case Some((a, b)) => MithrilClient.ImmutableFileRange.Range(a, b)
-            }
-            // Bounded blocking — the download is multi-GB and may take minutes; the resolver runs
-            // on the user-supplied EC, and the caller (ChainStoreRestorer) already returns a
-            // Future, so blocking inside this Future body is fine.
-            Await.result(
-                client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range),
-                Duration.Inf
-            )
-            runDirRestore(source.workDir, store)
-        } finally client.close()
+    )(using ExecutionContext): Future[ChainTip] = {
+        // Validate immutableFileRange before any I/O so that config errors surface as
+        // SnapshotConfigError rather than as an IllegalArgumentException from ResolvedRange.
+        source.immutableFileRange match {
+            case Some((a, b)) if a < 1 || b < a =>
+                return Future.failed(
+                  SnapshotError.SnapshotConfigError(
+                    s"immutableFileRange ($a, $b) is invalid: bounds must satisfy from >= 1 and from <= to"
+                  )
+                )
+            case _ =>
+        }
+        Future {
+            val client = MithrilClient.create(source.aggregatorUrl, source.genesisVerificationKey)
+            try {
+                val meta = pickSnapshotMeta(client, source.snapshotHash)
+                Files.createDirectories(source.workDir)
+                val range = source.immutableFileRange match {
+                    case None         => MithrilClient.ImmutableFileRange.Full
+                    case Some((a, b)) => MithrilClient.ImmutableFileRange.Range(a, b)
+                }
+                // Bounded blocking — the download is multi-GB and may take minutes; the resolver runs
+                // on the user-supplied EC, and the caller (ChainStoreRestorer) already returns a
+                // Future, so blocking inside this Future body is fine.
+                Await.result(
+                    client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range),
+                    Duration.Inf
+                )
+                runDirRestore(source.workDir, store)
+            } finally client.close()
+        }
     }
 
     def restoreDir(
