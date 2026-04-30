@@ -16,3 +16,6 @@ out
 .vscode
 metals.sbt
 /it-data
+
+# Local-only design notes / scratch — versioned design docs live under docs/internal/.
+docs/local/
