@@ -9,7 +9,12 @@ import scalus.cardano.node.stream.engine.snapshot.{
     SnapshotError
 }
 import scalus.cardano.node.stream.engine.{ChainStore, ChainStoreUtxoSet}
-import scalus.cardano.node.stream.{ChainTip, SnapshotSource}
+import scalus.cardano.node.stream.{
+    ChainTip,
+    MithrilVerificationMode,
+    SnapshotSource,
+    UnsupportedSourceException
+}
 
 import java.nio.file.Files
 import scala.concurrent.{ExecutionContext, Future}
@@ -27,17 +32,21 @@ import scala.util.{Success, Try}
   *     [[SnapshotDirRestorer]] at the pre-extracted directory. Useful for trusted-fixture /
   *     external-pipeline cases where the caller takes responsibility for authenticity.
   *
-  * The aggregator-fed [[restore]] path runs the full cryptographic chain:
+  * The aggregator-fed [[restore]] path is gated on
+  * [[scalus.cardano.node.stream.SnapshotSource.Mithril.verification]]:
   *
-  *   1. WASM `verify_certificate_chain(certHash)` — walks the Mithril cert chain back to the
-  *      genesis verification key (MuSig2 threshold-signature checks at each hop). Runs
-  *      concurrently with the artefact download.
-  *   2. [[DigestsVerifier]] — file-level SHA-256 cross-check against the manifest shipped in
-  *      `digests.tar.zst`. Inline-computed digests from the just-finished extraction skip a
-  *      full re-read of every immutable file.
-  *   3. [[CardanoDatabaseVerifier]] — recompute the Cardano-Database Merkle root over the
-  *      manifest entries and compare to the certificate's signed_message. A mismatch fails the
-  *      whole restore — we never touch the store with an unauthenticated snapshot.
+  *   - [[MithrilVerificationMode.Wasm]] (default) — full cryptographic chain:
+  *       1. WASM `verify_certificate_chain(certHash)` — walks the Mithril cert chain back to the
+  *          genesis verification key. Runs concurrently with the artefact download.
+  *       2. [[DigestsVerifier]] file-level SHA-256 cross-check against the digests manifest.
+  *          Inline-computed digests skip a full re-read of every immutable file.
+  *       3. [[CardanoDatabaseVerifier]] recomputes the Cardano-Database Merkle root and anchors
+  *          it in the verified cert's `signed_message`. Mismatch ⇒ restore fails.
+  *   - [[MithrilVerificationMode.SkipVerification]] — runs only step 2 (file-level digests).
+  *     Catches corruption / truncation but does NOT prove the manifest is signed. Not a
+  *     security claim; intended for trusted internal mirrors / CI fixtures / dev iteration.
+  *   - [[MithrilVerificationMode.ScalaOnly]] — pending M10e cross-platform native verifier.
+  *     Throws [[UnsupportedSourceException]] today.
   */
 final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
 
@@ -56,6 +65,17 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
                 )
             case _ =>
         }
+        source.verification match {
+            case MithrilVerificationMode.ScalaOnly =>
+                return Future.failed(
+                  UnsupportedSourceException(
+                    "MithrilVerificationMode.ScalaOnly is the M10e cross-platform verifier and " +
+                        "is not yet implemented. See docs/local/design/scala-only-verification-m10e.md. " +
+                        "Use MithrilVerificationMode.Wasm or .SkipVerification for now."
+                  )
+                )
+            case _ => // proceed
+        }
         val client = MithrilClient.create(source.aggregatorUrl, source.genesisVerificationKey)
         val task: Future[ChainTip] = async[Future] {
             val meta = await(pickSnapshotMeta(client, source.snapshotHash))
@@ -71,7 +91,18 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
             // certificateF was still in-flight would let `task.andThen { client.close() }` shut
             // down the WASM dispatcher under it (RejectedExecutionException + unobserved
             // failed Future).
-            val certificateF = client.verifyCertificateChain(meta.certificateHash)
+            //
+            // SkipVerification skips the WASM cert-chain step — file-level digests below are
+            // still required for any meaningful guarantee, since they catch corruption /
+            // truncation regardless of whether the manifest itself is anchored.
+            val certificateF = source.verification match {
+                case MithrilVerificationMode.Wasm =>
+                    client.verifyCertificateChain(meta.certificateHash)
+                case MithrilVerificationMode.SkipVerification =>
+                    Future.successful(null)
+                case MithrilVerificationMode.ScalaOnly =>
+                    sys.error("unreachable: ScalaOnly rejected at restore-entry")
+            }
             val downloadF =
                 client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range)
             val (layoutTry, certificateTry) = await(settledZip(downloadF, certificateF))
@@ -89,7 +120,12 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
                   s"file-level digest mismatch: ${fileLevel.mismatches.size} bad files; first: " +
                       fileLevel.mismatches.headOption.map(_.fileName).getOrElse("<none>")
                 )
-            CardanoDatabaseVerifier.verify(certificate, manifest, meta.beacon.immutableFileNumber)
+            if source.verification == MithrilVerificationMode.Wasm then
+                CardanoDatabaseVerifier.verify(
+                  certificate,
+                  manifest,
+                  meta.beacon.immutableFileNumber
+                )
 
             runDirRestore(source.workDir, store)
         }
