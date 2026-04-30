@@ -87,4 +87,27 @@ final class CardanoDatabaseVerifierSuite extends AnyFunSuite {
         )
         assert(ex.getMessage.contains("immutable_file_number"))
     }
+
+    test("ordering uses parsed numeric prefix, not filename-lex (handles 6+ digit numbers)") {
+        // Once immutable numbers exceed 5 digits, filename-lex would put "100000.chunk" BEFORE
+        // "99999.chunk" — wrong order. The verifier must sort by (number, filename).
+        val mixed = Seq(
+          "099999.chunk" -> "aa",
+          "099999.primary" -> "bb",
+          "099999.secondary" -> "cc",
+          "100000.chunk" -> "dd",
+          "100000.primary" -> "ee",
+          "100000.secondary" -> "ff"
+        )
+        val manifest = makeManifest(mixed)
+        // Numeric ordering — 99999 then 100000.
+        val numericOrder = Seq("aa", "bb", "cc", "dd", "ee", "ff")
+            .map(_.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+        val numericRoot =
+            MerkleMountainRange.computeRoot(numericOrder).toHex.toLowerCase
+        val cert = buildAuthenticCert(Map("cardano_database_merkle_root" -> numericRoot))
+        // If the verifier sorted by filename-lex it would compute over [dd, ee, ff, aa, bb, cc]
+        // instead, producing a different root and failing the comparison.
+        CardanoDatabaseVerifier.verify(cert, manifest, beaconImmutableFileNumber = 100000L)
+    }
 }

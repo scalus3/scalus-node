@@ -79,23 +79,27 @@ object CardanoDatabaseVerifier {
     }
 
     /** Filter the manifest to entries whose immutable-file-number is ≤ `cap`, then sort by
-      * `(number, filename-lex)` to match upstream's `BTreeMap<ImmutableFile, _>` iteration
-      * order. Returns `(filename, digestHex)` pairs.
+      * `(number, filename)` to match upstream's `BTreeMap<ImmutableFile, _>` iteration order
+      * (which is `(number, full-path)` — within a single number the path differs only in the
+      * extension, so filename-lex among `chunk` / `primary` / `secondary` is the right
+      * tiebreaker). Returns `(filename, digestHex)` pairs.
       *
-      * `BTreeMap<ImmutableFile, _>` sorts by `(number, full-path)`. Within a single number, the
-      * full path differs only in the extension (`.chunk` / `.primary` / `.secondary`); lex over
-      * those gives `chunk < primary < secondary` (c < p < s), which matches sorting by filename
-      * lex. Across numbers, the 5-digit zero-padded prefix preserves numeric order in lex too.
-      * So a single sort by filename suffices.
+      * Sorting by parsed number is load-bearing once immutable numbers exceed the 5-digit
+      * zero-padded width: filename-lex would put `"100000.chunk"` before `"99999.chunk"`,
+      * breaking the Merkle root.
       */
     private def canonicalDigestLeaves(
         manifest: DigestsVerifier.DigestManifest,
         cap: Long
     ): Seq[(String, String)] =
         manifest.entries
-            .filter { (name, _) => extractImmutableNumber(name).exists(_ <= cap) }
+            .iterator
+            .flatMap { (name, digest) =>
+                extractImmutableNumber(name).filter(_ <= cap).map(n => (n, name, digest))
+            }
             .toSeq
-            .sortBy(_._1)
+            .sortBy { case (n, name, _) => (n, name) }
+            .map { case (_, name, digest) => (name, digest) }
 
     /** Parse the leading numeric prefix of an immutable filename like `00042.chunk`. Returns
       * `None` for unrecognised names — defensive against future manifest entries that aren't
