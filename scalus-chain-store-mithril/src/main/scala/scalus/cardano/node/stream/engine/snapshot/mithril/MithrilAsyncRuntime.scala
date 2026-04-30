@@ -35,7 +35,8 @@ import scala.concurrent.{ExecutionContext, Future, Promise as SPromise}
 final class MithrilAsyncRuntime(
     val abi: WbindgenAbi,
     closureHashes: MithrilAsyncRuntime.ClosureHashes =
-        MithrilAsyncRuntime.ClosureHashes.Release0_10_4
+        MithrilAsyncRuntime.ClosureHashes.Release0_10_4,
+    onFetch: MithrilAsyncRuntime.FetchEvent => Unit = _ => ()
 ) {
 
     @volatile private var currentInstance: Instance = null.asInstanceOf[Instance]
@@ -489,7 +490,9 @@ final class MithrilAsyncRuntime(
                     MithrilAsyncRuntime.logger.debug(
                       s"fetch ${req.method.toUpperCase} ${req.url}"
                     )
-                    issueHttpRequest(req, promise)
+                    val started = System.nanoTime()
+                    safeFire(MithrilAsyncRuntime.FetchEvent.Started(req.method, req.url, started))
+                    issueHttpRequest(req, promise, started)
                 case other =>
                     postToDispatcher {
                         rejectRaw(promise, s"fetch: expected JsRequest, got $other")
@@ -499,7 +502,7 @@ final class MithrilAsyncRuntime(
         }
     }
 
-    private def issueHttpRequest(req: JsRequest, promise: JsPromise): Unit = {
+    private def issueHttpRequest(req: JsRequest, promise: JsPromise, startedNs: Long): Unit = {
         val httpReq =
             try buildHttpRequest(req)
             catch {
@@ -512,9 +515,14 @@ final class MithrilAsyncRuntime(
         httpClient
             .sendAsync(httpReq, HttpResponse.BodyHandlers.ofByteArray())
             .whenComplete { (resp, ex) =>
+                val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
                 if ex != null then {
                     MithrilAsyncRuntime.logger.warn(
                       s"fetch ${req.url} failed: ${unwrap(ex).getMessage}"
+                    )
+                    safeFire(
+                      MithrilAsyncRuntime.FetchEvent
+                          .Failed(req.method, req.url, unwrap(ex).getMessage, elapsedMs)
                     )
                     postToDispatcher {
                         rejectRaw(promise, s"fetch failed: ${unwrap(ex).getMessage}")
@@ -523,12 +531,30 @@ final class MithrilAsyncRuntime(
                     MithrilAsyncRuntime.logger.debug(
                       s"fetch ${req.url} → ${resp.statusCode} (${resp.body.length} bytes)"
                     )
+                    safeFire(
+                      MithrilAsyncRuntime.FetchEvent.Completed(
+                        req.method,
+                        req.url,
+                        resp.statusCode,
+                        resp.body.length.toLong,
+                        elapsedMs
+                      )
+                    )
                     postToDispatcher {
                         settleWith(promise, toJsResponse(req.url, resp))
                     }
                 }
             }
     }
+
+    private def safeFire(event: MithrilAsyncRuntime.FetchEvent): Unit =
+        try onFetch(event)
+        catch {
+            case scala.util.control.NonFatal(t) =>
+                MithrilAsyncRuntime.logger.warn(
+                  s"onFetch listener threw ${t.getClass.getSimpleName}: ${t.getMessage}"
+                )
+        }
 
     private def buildHttpRequest(req: JsRequest): HttpRequest = {
         val uri = URI.create(req.url)
@@ -675,6 +701,45 @@ object MithrilAsyncRuntime {
 
     private val logger: scribe.Logger =
         scribe.Logger("scalus.cardano.node.stream.engine.snapshot.mithril.MithrilAsyncRuntime")
+
+    /** Observability hook for every WASM-initiated fetch — fires both when a request is dispatched
+      * and when its response settles (success or failure). Useful to surface progress during
+      * long-running operations like `verify_certificate_chain`, which walks the chain back to
+      * genesis one HTTP round-trip per hop and is otherwise opaque.
+      *
+      * Listeners run on the JVM HttpClient's completion thread; throwing inside one is caught and
+      * logged but does not propagate to the WASM side.
+      */
+    sealed trait FetchEvent {
+        def method: String
+        def url: String
+    }
+    object FetchEvent {
+
+        /** Issued the moment the WASM client calls `fetch(req)`. `startedNanos` is the
+          * monotonic clock value at issue time — pair with [[Completed.elapsedMs]] /
+          * [[Failed.elapsedMs]] to derive in-flight durations.
+          */
+        final case class Started(method: String, url: String, startedNanos: Long) extends FetchEvent
+
+        /** The HTTP response settled with `statusCode` and `bodyLength` bytes after `elapsedMs`
+          * milliseconds. Note: WASM-driven `verify_certificate_chain` issues these strictly
+          * sequentially, so `elapsedMs` reflects per-hop latency.
+          */
+        final case class Completed(
+            method: String,
+            url: String,
+            statusCode: Int,
+            bodyLength: Long,
+            elapsedMs: Long
+        ) extends FetchEvent
+
+        /** The HTTP request did not produce a response (network error, malformed URL, JVM
+          * HttpClient rejection). The fetch promise settles with a JS-side rejection.
+          */
+        final case class Failed(method: String, url: String, error: String, elapsedMs: Long)
+            extends FetchEvent
+    }
 
     /** Synthetic JS function produced by `new Promise(executor)` — when `resolve(v)` is called from
       * Rust, we mutate the associated [[JsPromise]] to its fulfilled state.

@@ -430,14 +430,20 @@ object MithrilClient {
 
     /** Construct a client around a fresh WASM instance wired to `aggregatorUrl`. Caller owns the
       * returned client and must [[MithrilClient.close]] it when done.
+      *
+      * `onFetch` observes every WASM-initiated HTTP request — issued when the request is
+      * dispatched and again when the response settles. The chain-walk inside
+      * [[verifyCertificateChain]] is otherwise opaque (one fetch per cert, hundreds of hops on
+      * preview); install a listener to surface progress.
       */
     def create(
         aggregatorUrl: String,
         genesisVerificationKey: String,
-        hashes: MithrilAsyncRuntime.ClosureHashes = MithrilAsyncRuntime.ClosureHashes.Release0_10_4
+        hashes: MithrilAsyncRuntime.ClosureHashes = MithrilAsyncRuntime.ClosureHashes.Release0_10_4,
+        onFetch: MithrilAsyncRuntime.FetchEvent => Unit = _ => ()
     )(using ec: ExecutionContext): MithrilClient = {
         val abi = new WbindgenAbi(hashes)
-        val asyncRt = new MithrilAsyncRuntime(abi, hashes)
+        val asyncRt = new MithrilAsyncRuntime(abi, hashes, onFetch)
         val imports = abi.defaultImports ++ abi.pinnedImports ++ asyncRt.asyncImports
         val (rt, _) = MithrilWasmRuntime.instantiate(imports)
         asyncRt.attach(rt.instance)

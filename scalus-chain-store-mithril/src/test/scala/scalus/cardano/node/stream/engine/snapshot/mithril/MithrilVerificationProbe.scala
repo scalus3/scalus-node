@@ -3,6 +3,8 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.node.stream.engine.snapshot.immutabledb.DigestsVerifier
 
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.concurrent.{Await, ExecutionContext}
@@ -53,7 +55,23 @@ final class MithrilVerificationProbe extends AnyFunSuite {
         Files.createDirectories(destDir)
         info(s"snapshot dir: $destDir")
 
-        val client = MithrilClient.create(aggregatorUrl, genesisVerificationKey)
+        // Surface every WASM-initiated HTTP fetch so the cert-chain walk (otherwise opaque) shows
+        // per-hop progress in real time.
+        val fetchCount = new java.util.concurrent.atomic.AtomicLong(0L)
+        val onFetch: MithrilAsyncRuntime.FetchEvent => Unit = {
+            case MithrilAsyncRuntime.FetchEvent.Started(_, url, _) =>
+                val n = fetchCount.incrementAndGet()
+                if n % 25 == 1L then info(f"wasm-fetch #$n%4d → $url")
+            case MithrilAsyncRuntime.FetchEvent.Completed(_, url, status, _, ms) =>
+                if ms > 1000L then info(f"wasm-fetch slow ${ms}%4d ms $status $url")
+            case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
+                info(f"wasm-fetch FAILED ${ms}%4d ms $url: $err")
+        }
+        val client = MithrilClient.create(
+          aggregatorUrl,
+          genesisVerificationKey,
+          onFetch = onFetch
+        )
         try {
             val pinnedHash = sys.env.get("SCALUS_MITHRIL_SNAPSHOT_HASH")
             val meta = pinnedHash match {
@@ -75,10 +93,18 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"certHash=${meta.certificateHash}"
             )
 
-            // Optional CDN-window fence — preview retains only the last ~15K chunks. Skip the
-            // download step if the marker dir already holds the expected artefacts; otherwise
-            // re-run download (resumable via .extracted markers).
-            val lower = sys.env.get("SCALUS_MITHRIL_FROM").map(_.toLong).getOrElse(1L)
+            // CDN-window fence — preview retains only the last ~15K chunks. Resolve the lower
+            // bound: explicit env var wins, otherwise binary-search via HEAD requests over the
+            // immutable URL template.
+            val lower = sys.env
+                .get("SCALUS_MITHRIL_FROM")
+                .map(_.toLong)
+                .getOrElse {
+                    info("probing CDN for earliest-available immutable (HEAD requests)...")
+                    val lo = findEarliestAvailable(meta)
+                    info(s"earliest available = $lo (tip = ${meta.beacon.immutableFileNumber})")
+                    lo
+                }
             val upper = sys.env
                 .get("SCALUS_MITHRIL_TO")
                 .map(_.toLong)
@@ -96,9 +122,11 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"inline-digest cache size = ${layout.inlineDigests.size}"
             )
 
+            // Cert-chain verification walks back to genesis — on preview this is hundreds of
+            // hops, each a network round-trip + MuSig2 verification; minutes is normal.
             val tCert = System.nanoTime()
             val certificate =
-                Await.result(client.verifyCertificateChain(meta.certificateHash), 5.minutes)
+                Await.result(client.verifyCertificateChain(meta.certificateHash), 1.hour)
             info(
               s"cert chain verified in ${(System.nanoTime() - tCert) / 1_000_000L}ms; " +
                   s"signed_message=${certificate.signedMessage}"
@@ -132,5 +160,31 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"(${(System.nanoTime() - tMerkle) / 1_000_000L}ms)"
             )
         } finally client.close()
+    }
+
+    /** HEAD a candidate URL, return true on 2xx. 403 / 404 means "not retained". */
+    private def headOk(http: HttpClient, url: String): Boolean = {
+        val req = HttpRequest
+            .newBuilder(URI.create(url))
+            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+            .build()
+        val resp = http.send(req, HttpResponse.BodyHandlers.discarding())
+        resp.statusCode / 100 == 2
+    }
+
+    /** Binary-search the rolling-retention window: smallest `n` in `[1..tip]` whose `immutable-N`
+      * URL responds 2xx. O(log N) HEAD requests.
+      */
+    private def findEarliestAvailable(meta: MithrilMessages.CardanoDatabaseV2Metadata): Long = {
+        val http = HttpClient.newHttpClient()
+        val tip = meta.beacon.immutableFileNumber
+        var lo = 1L
+        var hi = tip
+        while lo < hi do {
+            val mid = lo + (hi - lo) / 2
+            if headOk(http, MithrilClient.immutableUrl(meta, mid)) then hi = mid
+            else lo = mid + 1
+        }
+        lo
     }
 }
