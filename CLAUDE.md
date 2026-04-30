@@ -98,6 +98,6 @@ Long-form architecture and milestone notes live in `docs/local/design/`. Start w
 - Use conventional commit style: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Keep messages short: 1-2 paragraphs
 - Mention key changes
-- Do not place attribution into commit messages and pull request.
+- Do not place attribution in commit messages or pull requests.
 
 
