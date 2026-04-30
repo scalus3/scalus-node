@@ -41,19 +41,18 @@ trait MithrilSnapshotResolver {
 
 object MithrilSnapshotResolver {
 
-    /** ServiceLoader-based discovery. Returns the first registered resolver (there's only one in
-      * practice — `scalus-chain-store-mithril`'s `MithrilSnapshotResolverImpl`). Wrapped in a
-      * defensive try/catch so platforms without ServiceLoader (Scala.js partial impl) silently
-      * return `None` instead of failing class load.
+    /** ServiceLoader-based discovery. Returns the first registered resolver, or `None` if no impl
+      * is registered. In practice there's only one — `scalus-chain-store-mithril`'s
+      * `MithrilSnapshotResolverImpl`. On Scala.js the same path applies: Scala.js implements
+      * `java.util.ServiceLoader` and reads `META-INF/services` from the linker classpath, so
+      * absence simply yields `None`. A `ServiceConfigurationError` from a malformed registration
+      * or impl init failure is *not* caught — broken service wiring should be diagnosable, not
+      * silently downgraded to `UnsupportedSourceException`.
       */
     def find(): Option[MithrilSnapshotResolver] = {
-        try {
-            val it = java.util.ServiceLoader
-                .load(classOf[MithrilSnapshotResolver])
-                .iterator()
-            if it.hasNext then Some(it.next()) else None
-        } catch {
-            case _: Throwable => None
-        }
+        val it = java.util.ServiceLoader
+            .load(classOf[MithrilSnapshotResolver])
+            .iterator()
+        if it.hasNext then Some(it.next()) else None
     }
 }

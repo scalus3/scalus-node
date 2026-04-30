@@ -1,5 +1,7 @@
 package scalus.cardano.node.stream.engine.snapshot.mithril
 
+import cps.*
+import cps.monads.FutureAsyncMonad
 import scalus.cardano.node.stream.engine.snapshot.{
     MithrilSnapshotResolver,
     SnapshotDirRestorer,
@@ -9,8 +11,7 @@ import scalus.cardano.node.stream.engine.{ChainStore, ChainStoreUtxoSet}
 import scalus.cardano.node.stream.{ChainTip, SnapshotSource}
 
 import java.nio.file.Files
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future}
 
 /** ServiceLoader-discovered implementation of [[MithrilSnapshotResolver]].
   *
@@ -45,25 +46,18 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
                 )
             case _ =>
         }
-        Future {
-            val client = MithrilClient.create(source.aggregatorUrl, source.genesisVerificationKey)
-            try {
-                val meta = pickSnapshotMeta(client, source.snapshotHash)
-                Files.createDirectories(source.workDir)
-                val range = source.immutableFileRange match {
-                    case None         => MithrilClient.ImmutableFileRange.Full
-                    case Some((a, b)) => MithrilClient.ImmutableFileRange.Range(a, b)
-                }
-                // Bounded blocking — the download is multi-GB and may take minutes; the resolver runs
-                // on the user-supplied EC, and the caller (ChainStoreRestorer) already returns a
-                // Future, so blocking inside this Future body is fine.
-                Await.result(
-                    client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range),
-                    Duration.Inf
-                )
-                runDirRestore(source.workDir, store)
-            } finally client.close()
+        val client = MithrilClient.create(source.aggregatorUrl, source.genesisVerificationKey)
+        val task: Future[ChainTip] = async[Future] {
+            val meta = await(pickSnapshotMeta(client, source.snapshotHash))
+            Files.createDirectories(source.workDir)
+            val range = source.immutableFileRange match {
+                case None         => MithrilClient.ImmutableFileRange.Full
+                case Some((a, b)) => MithrilClient.ImmutableFileRange.Range(a, b)
+            }
+            await(client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range))
+            runDirRestore(source.workDir, store)
         }
+        task.andThen { case _ => client.close() }
     }
 
     def restoreDir(
@@ -92,24 +86,27 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
     private def pickSnapshotMeta(
         client: MithrilClient,
         pinnedHash: Option[String]
-    )(using ExecutionContext): MithrilMessages.CardanoDatabaseV2Metadata = pinnedHash match {
-        case Some(hash) =>
-            Await.result(client.getCardanoDatabaseV2Snapshot(hash), Duration.Inf).getOrElse(
-              throw SnapshotError.SnapshotConfigError(
-                s"aggregator returned no snapshot for pinned hash=$hash"
-              )
-            )
-        case None =>
-            val list = Await.result(client.listCardanoDatabaseV2Snapshots(), Duration.Inf)
-            val latest = list.headOption.getOrElse(
-              throw SnapshotError.SnapshotConfigError(
-                "aggregator returned no Cardano Database V2 snapshots"
-              )
-            )
-            Await.result(client.getCardanoDatabaseV2Snapshot(latest.hash), Duration.Inf).getOrElse(
-              throw SnapshotError.SnapshotConfigError(
-                s"aggregator listed snapshot ${latest.hash} but full metadata is missing"
-              )
-            )
-    }
+    )(using ExecutionContext): Future[MithrilMessages.CardanoDatabaseV2Metadata] =
+        async[Future] {
+            pinnedHash match {
+                case Some(hash) =>
+                    await(client.getCardanoDatabaseV2Snapshot(hash)).getOrElse(
+                      throw SnapshotError.SnapshotConfigError(
+                        s"aggregator returned no snapshot for pinned hash=$hash"
+                      )
+                    )
+                case None =>
+                    val list = await(client.listCardanoDatabaseV2Snapshots())
+                    val latest = list.headOption.getOrElse(
+                      throw SnapshotError.SnapshotConfigError(
+                        "aggregator returned no Cardano Database V2 snapshots"
+                      )
+                    )
+                    await(client.getCardanoDatabaseV2Snapshot(latest.hash)).getOrElse(
+                      throw SnapshotError.SnapshotConfigError(
+                        s"aggregator listed snapshot ${latest.hash} but full metadata is missing"
+                      )
+                    )
+            }
+        }
 }
