@@ -55,17 +55,20 @@ final class MithrilVerificationProbe extends AnyFunSuite {
         Files.createDirectories(destDir)
         info(s"snapshot dir: $destDir")
 
-        // Surface every WASM-initiated HTTP fetch so the cert-chain walk (otherwise opaque) shows
-        // per-hop progress in real time.
+        // Surface every WASM-initiated HTTP fetch in real time so the cert-chain walk (otherwise
+        // opaque) shows per-hop progress. Use `println` rather than scalatest's `info(...)`:
+        // scalatest buffers `info` output until test completion, which is useless during a
+        // one-hour wait — we'd never see it before the timeout.
         val fetchCount = new java.util.concurrent.atomic.AtomicLong(0L)
         val onFetch: MithrilAsyncRuntime.FetchEvent => Unit = {
             case MithrilAsyncRuntime.FetchEvent.Started(_, url, _) =>
                 val n = fetchCount.incrementAndGet()
-                if n % 25 == 1L then info(f"wasm-fetch #$n%4d → $url")
+                if n % 25 == 1L then println(f"[wasm-fetch] #$n%4d → $url")
             case MithrilAsyncRuntime.FetchEvent.Completed(_, url, status, _, ms) =>
-                if ms > 1000L then info(f"wasm-fetch slow ${ms}%4d ms $status $url")
+                if ms > 1000L then
+                    println(f"[wasm-fetch] slow ${ms}%4d ms status=$status $url")
             case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
-                info(f"wasm-fetch FAILED ${ms}%4d ms $url: $err")
+                println(f"[wasm-fetch] FAILED ${ms}%4d ms $url: $err")
         }
         val client = MithrilClient.create(
           aggregatorUrl,
