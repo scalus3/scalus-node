@@ -92,7 +92,7 @@ Scalac flags (`commonScalacOptions`): `-deprecation`, `-feature`, `-explain`, `-
 
 Long-form architecture and milestone notes live in `docs/local/design/`. Start with `indexer-node.md` for the public API surface and the engine's role; the milestone-specific docs (`engine-persistence-minimal.md`, `checkpoint-restart-m7.md`, `chain-store-m9.md`, `snapshot-bootstrap-m10.md`, `cardano-network-*.md`, `immutable-streaming-emulator.md`) cover individual subsystems.
 
-## Repostory rules
+## Repository rules
 
 - Use conventional commit style: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Keep messages short: 1-2 paragraphs
