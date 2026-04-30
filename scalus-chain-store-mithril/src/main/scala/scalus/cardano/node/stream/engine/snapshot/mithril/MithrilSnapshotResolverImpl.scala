@@ -2,6 +2,7 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 
 import cps.*
 import cps.monads.FutureAsyncMonad
+import scalus.cardano.node.stream.engine.snapshot.immutabledb.DigestsVerifier
 import scalus.cardano.node.stream.engine.snapshot.{
     MithrilSnapshotResolver,
     SnapshotDirRestorer,
@@ -21,13 +22,21 @@ import scala.concurrent.{ExecutionContext, Future}
   *     snapshot (latest or pinned by hash), download the V2 artefact into the user-provided
   *     `workDir` (resumable across restarts via `.extracted` markers), then run
   *     [[SnapshotDirRestorer]] over the resulting on-disk layout.
-  *   - [[restoreDir]] — skip download + verification; just point [[SnapshotDirRestorer]] at the
-  *     pre-extracted directory. Useful for trusted-fixture / external-pipeline cases.
+  *   - [[restoreDir]] — skip download + cryptographic verification; just point
+  *     [[SnapshotDirRestorer]] at the pre-extracted directory. Useful for trusted-fixture /
+  *     external-pipeline cases where the caller takes responsibility for authenticity.
   *
-  * Cryptographic verification (cert-chain walk + Merkle anchoring) is not yet wired — currently
-  * relies on the digests-manifest cross-check inside `DigestsVerifier` for file-level integrity.
-  * See `docs/local/claude/indexer/snapshot-bootstrap-m10.md` *Other deferred work* for the path
-  * to anchor the manifest into the signed Mithril chain via `verify_certificate_chain`.
+  * The aggregator-fed [[restore]] path runs the full cryptographic chain:
+  *
+  *   1. WASM `verify_certificate_chain(certHash)` — walks the Mithril cert chain back to the
+  *      genesis verification key (MuSig2 threshold-signature checks at each hop). Runs
+  *      concurrently with the artefact download.
+  *   2. [[DigestsVerifier]] — file-level SHA-256 cross-check against the manifest shipped in
+  *      `digests.tar.zst`. Inline-computed digests from the just-finished extraction skip a
+  *      full re-read of every immutable file.
+  *   3. [[CardanoDatabaseVerifier]] — recompute the Cardano-Database Merkle root over the
+  *      manifest entries and compare to the certificate's signed_message. A mismatch fails the
+  *      whole restore — we never touch the store with an unauthenticated snapshot.
   */
 final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
 
@@ -54,7 +63,28 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
                 case None         => MithrilClient.ImmutableFileRange.Full
                 case Some((a, b)) => MithrilClient.ImmutableFileRange.Range(a, b)
             }
-            await(client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range))
+
+            // Cert-chain verification runs concurrently with the download — independent work, and
+            // the cert hash is known up-front.
+            val certificateF = client.verifyCertificateChain(meta.certificateHash)
+            val downloadF =
+                client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range)
+            val layout = await(downloadF)
+            val certificate = await(certificateF)
+
+            val manifest = DigestsVerifier.loadManifestAt(source.workDir)
+            val fileLevel = DigestsVerifier.verifyWithCache(
+              source.workDir.resolve("immutable"),
+              manifest,
+              layout.inlineDigests
+            )
+            if !fileLevel.presentMatchesManifest then
+                throw SnapshotError.SnapshotCorrupted(
+                  s"file-level digest mismatch: ${fileLevel.mismatches.size} bad files; first: " +
+                      fileLevel.mismatches.headOption.map(_.fileName).getOrElse("<none>")
+                )
+            CardanoDatabaseVerifier.verify(certificate, manifest, meta.beacon.immutableFileNumber)
+
             runDirRestore(source.workDir, store)
         }
         task.andThen { case _ => client.close() }
