@@ -83,15 +83,22 @@ class ChainStoreRestorerSuite extends AnyFunSuite with ScalaFutures {
         Files.deleteIfExists(dir)
     }
 
-    test("Mithril source raises UnsupportedSourceException with a pointer to M10b") {
+    test("Mithril source raises UnsupportedSourceException when no resolver is on the classpath") {
+        // scalus-streaming-core's test classpath has no MithrilSnapshotResolver service registered,
+        // so the SPI lookup returns None and the dispatch fails with a clear pointer at the
+        // missing scalus-chain-store-mithril dependency.
         val store = new KvChainStore(InMemoryKvStore())
         val restorer = ChainStoreRestorer(store)
-        val cause = restorer
-            .restore(SnapshotSource.Mithril("https://example.test", "abcd"))
-            .failed
-            .futureValue
-        assert(cause.isInstanceOf[scalus.cardano.node.stream.UnsupportedSourceException])
-        assert(cause.getMessage.contains("M10b"))
+        val workDir = Files.createTempDirectory("scalus-restorer-mithril-")
+        try {
+            val cause = restorer
+                .restore(SnapshotSource.Mithril("https://example.test", "abcd", workDir))
+                .failed
+                .futureValue
+            assert(cause.isInstanceOf[scalus.cardano.node.stream.UnsupportedSourceException])
+            assert(cause.getMessage.contains("scalus-chain-store-mithril"))
+            assert(cause.getMessage.contains("M10b"))
+        } finally Files.deleteIfExists(workDir)
     }
 
     test("body sha256 mismatch surfaces as SnapshotCorrupted") {
