@@ -13,6 +13,7 @@ import scalus.cardano.node.stream.{ChainTip, SnapshotSource}
 
 import java.nio.file.Files
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.{Success, Try}
 
 /** ServiceLoader-discovered implementation of [[MithrilSnapshotResolver]].
   *
@@ -65,12 +66,17 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
             }
 
             // Cert-chain verification runs concurrently with the download — independent work, and
-            // the cert hash is known up-front.
+            // the cert hash is known up-front. We await both futures via `settledZip` so neither
+            // outlives `task`: an early download failure that completed `task` while
+            // certificateF was still in-flight would let `task.andThen { client.close() }` shut
+            // down the WASM dispatcher under it (RejectedExecutionException + unobserved
+            // failed Future).
             val certificateF = client.verifyCertificateChain(meta.certificateHash)
             val downloadF =
                 client.downloadCardanoDatabaseV2(meta, source.workDir, immutableRange = range)
-            val layout = await(downloadF)
-            val certificate = await(certificateF)
+            val (layoutTry, certificateTry) = await(settledZip(downloadF, certificateF))
+            val layout = layoutTry.get
+            val certificate = certificateTry.get
 
             val manifest = DigestsVerifier.loadManifestAt(source.workDir)
             val fileLevel = DigestsVerifier.verifyWithCache(
@@ -112,6 +118,16 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
           )
         )
     }
+
+    /** Wait for both `fa` and `fb` to settle (success or failure) and surface the outcomes as
+      * a `(Try[A], Try[B])`. Unlike `Future.zip`, a failure in `fa` does not short-circuit
+      * before `fb` finishes — a precondition for safely running cleanup that releases
+      * resources both futures depend on.
+      */
+    private def settledZip[A, B](fa: Future[A], fb: Future[B])(using
+        ExecutionContext
+    ): Future[(Try[A], Try[B])] =
+        fa.transform(Success(_)).zip(fb.transform(Success(_)))
 
     private def pickSnapshotMeta(
         client: MithrilClient,
