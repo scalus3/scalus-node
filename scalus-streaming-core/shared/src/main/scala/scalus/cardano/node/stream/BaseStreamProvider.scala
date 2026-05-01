@@ -1,7 +1,8 @@
 package scalus.cardano.node.stream
 
-import scalus.cardano.ledger.{Block, CardanoInfo, ProtocolParams, Transaction, TransactionHash, TransactionInput, TransactionOutput, Utxos}
+import scalus.cardano.ledger.{Block, CardanoInfo, DataHash, ProtocolParams, Transaction, TransactionHash, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.node.{BlockchainProvider, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
+import scalus.uplc.builtin.Data
 import scalus.cardano.node.stream.engine.{Engine, Mailbox}
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -155,6 +156,15 @@ abstract class BaseStreamProvider[F[_], C[_]](
                     case Some(bp) => bp.findUtxos(query)
                     case None =>
                         Future.successful(Left(UtxoQueryError.NotFound(noBackupSource(query))))
+        }
+    }
+
+    final def getDatum(datumHash: DataHash): F[Option[Data]] = liftFuture {
+        // Engine doesn't track datums in-memory yet; fall through to the historical-backup reader
+        // when one is configured, otherwise report not-found rather than failing the call.
+        engine.backup match {
+            case Some(bp) => bp.getDatum(datumHash)
+            case None     => Future.successful(None)
         }
     }
 
