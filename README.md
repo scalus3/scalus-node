@@ -4,10 +4,6 @@ Embedded Cardano node modules for [Scalus](https://github.com/scalus3/scalus): a
 rollback-aware streaming engine, Cardano network protocols (Node-to-Node),
 ChainStore back-ends (RocksDB), and Mithril-verified snapshot restore.
 
-This repo was extracted from `scalus3/scalus` (subdirectory `scalus-embedded-node/`)
-with full per-file commit history preserved. It depends on the published
-`org.scalus` artifacts as binary dependencies.
-
 ## Modules
 
 - `scalus-streaming-core` — rollback-aware `BlockchainStreamProvider` engine, ADTs, chain-sync adapters (JVM + JS).

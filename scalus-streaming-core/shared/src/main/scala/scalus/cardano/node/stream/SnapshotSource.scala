@@ -48,13 +48,19 @@ object SnapshotSource {
       *   rolling window (e.g. testing-preview keeps ~15K most-recent chunks).
       * @param snapshotHash
       *   pin a specific signed snapshot by hash; `None` picks the aggregator's latest.
+      * @param verification
+      *   selects the cryptographic verification path — see [[MithrilVerificationMode]]. Default
+      *   [[MithrilVerificationMode.Wasm]] preserves the upstream authentication guarantee;
+      *   [[MithrilVerificationMode.SkipVerification]] is faster but unauthenticated;
+      *   [[MithrilVerificationMode.ScalaOnly]] is the M10e cross-platform verifier (pending).
       */
     case class Mithril(
         aggregatorUrl: String,
         genesisVerificationKey: String,
         workDir: Path,
         immutableFileRange: Option[(Long, Long)] = None,
-        snapshotHash: Option[String] = None
+        snapshotHash: Option[String] = None,
+        verification: MithrilVerificationMode = MithrilVerificationMode.Wasm
     ) extends SnapshotSource
 
     /** Already-extracted cardano-node snapshot directory — `<dir>/immutable/` and

@@ -3,11 +3,13 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.node.stream.engine.snapshot.immutabledb.DigestsVerifier
 
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.concurrent.{Await, ExecutionContext}
 
-/** End-to-end cryptographic verification probe against the real `testing-preview` aggregator.
+/** End-to-end cryptographic verification probe against a real Mithril aggregator.
   *
   * Exercises the full chain — `MithrilClient.verifyCertificateChain` (cert-chain walk in WASM,
   * back to the genesis verification key) → `DigestsVerifier.verify` (file-level SHA-256
@@ -22,29 +24,62 @@ import scala.concurrent.{Await, ExecutionContext}
   * with `SCALUS_MITHRIL_SNAPSHOT_HASH` to verify against a previously-downloaded artifact whose
   * meta differs from the aggregator's current latest.
   *
+  * The probe defaults to the `testing-preview` aggregator. Override with `SCALUS_MITHRIL_AGGREGATOR`
+  * (full base URL ending in `/aggregator`) and `SCALUS_MITHRIL_GENESIS_KEY` (hex-encoded JSON
+  * byte array — the format Mithril publishes on its Releases page) to point the probe at preprod,
+  * mainnet, or any other aggregator. Both must be supplied together; falling back to
+  * preview defaults when only one is set would silently mix networks.
+  *
   * Invoke with:
   * {{{
   *   SCALUS_MITHRIL_VERIFY_PREVIEW=1 \
   *   SCALUS_MITHRIL_DEST=/data/preview \
   *     sbt 'scalusChainStoreMithril/testOnly *MithrilVerificationProbe'
+  *
+  *   # mainnet (genesis key from Mithril Releases page):
+  *   SCALUS_MITHRIL_VERIFY_PREVIEW=1 \
+  *   SCALUS_MITHRIL_AGGREGATOR=https://aggregator.release-mainnet.api.mithril.network/aggregator \
+  *   SCALUS_MITHRIL_GENESIS_KEY=<hex-bytes> \
+  *   SCALUS_MITHRIL_DEST=/data/mainnet \
+  *     sbt 'scalusChainStoreMithril/testOnly *MithrilVerificationProbe'
   * }}}
   */
 final class MithrilVerificationProbe extends AnyFunSuite {
 
-    private val aggregatorUrl =
+    private val DefaultPreviewAggregator =
         "https://aggregator.testing-preview.api.mithril.network/aggregator"
-    private val genesisVerificationKey =
+    private val DefaultPreviewGenesisKey =
         "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38" +
             "352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234" +
             "332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d"
 
+    /** Resolve aggregator URL + genesis key. Both must come from the same source — either both
+      * preview defaults, or both env vars — so we don't accidentally verify a mainnet snapshot
+      * against the preview genesis key (which would silently fail every cert-chain walk).
+      */
+    private def resolveNetwork(): (String, String) = {
+        val urlEnv = sys.env.get("SCALUS_MITHRIL_AGGREGATOR").filter(_.nonEmpty)
+        val keyEnv = sys.env.get("SCALUS_MITHRIL_GENESIS_KEY").filter(_.nonEmpty)
+        (urlEnv, keyEnv) match {
+            case (Some(u), Some(k)) => (u, k)
+            case (None, None)       => (DefaultPreviewAggregator, DefaultPreviewGenesisKey)
+            case (Some(_), None) =>
+                fail("SCALUS_MITHRIL_AGGREGATOR set without SCALUS_MITHRIL_GENESIS_KEY — both required")
+            case (None, Some(_)) =>
+                fail("SCALUS_MITHRIL_GENESIS_KEY set without SCALUS_MITHRIL_AGGREGATOR — both required")
+        }
+    }
+
     test(
-      "[manual] verify full preview snapshot end-to-end (requires SCALUS_MITHRIL_VERIFY_PREVIEW=1)"
+      "[manual] verify full snapshot end-to-end (requires SCALUS_MITHRIL_VERIFY_PREVIEW=1)"
     ) {
         val enabled = sys.env.get("SCALUS_MITHRIL_VERIFY_PREVIEW").contains("1")
         assume(enabled, "set SCALUS_MITHRIL_VERIFY_PREVIEW=1 to run")
 
         given ExecutionContext = ExecutionContext.global
+
+        val (aggregatorUrl, genesisVerificationKey) = resolveNetwork()
+        info(s"aggregator: $aggregatorUrl")
 
         val destDir = sys.env
             .get("SCALUS_MITHRIL_DEST")
@@ -53,7 +88,45 @@ final class MithrilVerificationProbe extends AnyFunSuite {
         Files.createDirectories(destDir)
         info(s"snapshot dir: $destDir")
 
-        val client = MithrilClient.create(aggregatorUrl, genesisVerificationKey)
+        // Surface every WASM-initiated HTTP fetch in real time so the cert-chain walk (otherwise
+        // opaque) shows per-hop progress. Use `println` rather than scalatest's `info(...)`:
+        // scalatest buffers `info` output until test completion, which is useless during a
+        // one-hour wait — we'd never see it before the timeout.
+        // Stride between Started prints. Default 1 (print every fetch) for diagnostic runs;
+        // override with SCALUS_MITHRIL_FETCH_LOG_STRIDE=N to throttle once we know per-fetch
+        // cadence. Slow-fetch threshold is similarly tunable via SCALUS_MITHRIL_FETCH_SLOW_MS.
+        val stride = sys.env.get("SCALUS_MITHRIL_FETCH_LOG_STRIDE").map(_.toLong).getOrElse(1L)
+        val slowMs = sys.env.get("SCALUS_MITHRIL_FETCH_SLOW_MS").map(_.toLong).getOrElse(250L)
+        val fetchCount = new java.util.concurrent.atomic.AtomicLong(0L)
+        val onFetch: MithrilAsyncRuntime.FetchEvent => Unit = {
+            case MithrilAsyncRuntime.FetchEvent.Started(_, url, _) =>
+                val n = fetchCount.incrementAndGet()
+                if n % stride == 0L then println(f"[wasm-fetch] #$n%4d → $url")
+            case MithrilAsyncRuntime.FetchEvent.Completed(_, url, status, _, ms) =>
+                if ms >= slowMs then
+                    println(f"[wasm-fetch] slow ${ms}%4d ms status=$status $url")
+            case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
+                println(f"[wasm-fetch] FAILED ${ms}%4d ms $url: $err")
+        }
+        // Optional Chicory CALL profiler — overhead is measurable; only enabled when
+        // SCALUS_MITHRIL_PROFILE=1 (same flag as the runtime's microtask sampler).
+        val profiler: Option[ChicoryCallProfiler] =
+            if MithrilAsyncRuntime.profileEnabled then
+                Some(
+                  new ChicoryCallProfiler(
+                    com.dylibso.chicory.wasm.Parser.parse(MithrilWasmRuntime.loadWasmBytes()),
+                    dumpEverySec = 10L,
+                    topK = 25
+                  )
+                )
+            else None
+
+        val client = MithrilClient.create(
+          aggregatorUrl,
+          genesisVerificationKey,
+          onFetch = onFetch,
+          executionListener = profiler
+        )
         try {
             val pinnedHash = sys.env.get("SCALUS_MITHRIL_SNAPSHOT_HASH")
             val meta = pinnedHash match {
@@ -75,10 +148,18 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"certHash=${meta.certificateHash}"
             )
 
-            // Optional CDN-window fence — preview retains only the last ~15K chunks. Skip the
-            // download step if the marker dir already holds the expected artefacts; otherwise
-            // re-run download (resumable via .extracted markers).
-            val lower = sys.env.get("SCALUS_MITHRIL_FROM").map(_.toLong).getOrElse(1L)
+            // CDN-window fence — preview retains only the last ~15K chunks. Resolve the lower
+            // bound: explicit env var wins, otherwise binary-search via HEAD requests over the
+            // immutable URL template.
+            val lower = sys.env
+                .get("SCALUS_MITHRIL_FROM")
+                .map(_.toLong)
+                .getOrElse {
+                    info("probing CDN for earliest-available immutable (HEAD requests)...")
+                    val lo = findEarliestAvailable(meta)
+                    info(s"earliest available = $lo (tip = ${meta.beacon.immutableFileNumber})")
+                    lo
+                }
             val upper = sys.env
                 .get("SCALUS_MITHRIL_TO")
                 .map(_.toLong)
@@ -96,9 +177,11 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"inline-digest cache size = ${layout.inlineDigests.size}"
             )
 
+            // Cert-chain verification walks back to genesis — on preview this is hundreds of
+            // hops, each a network round-trip + MuSig2 verification; minutes is normal.
             val tCert = System.nanoTime()
             val certificate =
-                Await.result(client.verifyCertificateChain(meta.certificateHash), 5.minutes)
+                Await.result(client.verifyCertificateChain(meta.certificateHash), 3.hours)
             info(
               s"cert chain verified in ${(System.nanoTime() - tCert) / 1_000_000L}ms; " +
                   s"signed_message=${certificate.signedMessage}"
@@ -131,6 +214,35 @@ final class MithrilVerificationProbe extends AnyFunSuite {
               s"✓ Merkle root anchored — recomputed signed_message matches certificate " +
                   s"(${(System.nanoTime() - tMerkle) / 1_000_000L}ms)"
             )
-        } finally client.close()
+        } finally {
+            try client.close()
+            finally profiler.foreach(_.close())
+        }
+    }
+
+    /** HEAD a candidate URL, return true on 2xx. 403 / 404 means "not retained". */
+    private def headOk(http: HttpClient, url: String): Boolean = {
+        val req = HttpRequest
+            .newBuilder(URI.create(url))
+            .method("HEAD", HttpRequest.BodyPublishers.noBody())
+            .build()
+        val resp = http.send(req, HttpResponse.BodyHandlers.discarding())
+        resp.statusCode / 100 == 2
+    }
+
+    /** Binary-search the rolling-retention window: smallest `n` in `[1..tip]` whose `immutable-N`
+      * URL responds 2xx. O(log N) HEAD requests.
+      */
+    private def findEarliestAvailable(meta: MithrilMessages.CardanoDatabaseV2Metadata): Long = {
+        val http = HttpClient.newHttpClient()
+        val tip = meta.beacon.immutableFileNumber
+        var lo = 1L
+        var hi = tip
+        while lo < hi do {
+            val mid = lo + (hi - lo) / 2
+            if headOk(http, MithrilClient.immutableUrl(meta, mid)) then hi = mid
+            else lo = mid + 1
+        }
+        lo
     }
 }

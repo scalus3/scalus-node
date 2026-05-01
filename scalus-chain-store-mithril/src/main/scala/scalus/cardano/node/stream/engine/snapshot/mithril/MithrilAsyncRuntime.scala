@@ -7,7 +7,7 @@ import scalus.cardano.node.stream.engine.snapshot.mithril.WbindgenAbi.*
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Duration
-import java.util.concurrent.{ArrayBlockingQueue, Executors, ThreadFactory}
+import java.util.concurrent.{ArrayBlockingQueue, Executors, ThreadFactory, TimeUnit}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future, Promise as SPromise}
 
@@ -35,7 +35,8 @@ import scala.concurrent.{ExecutionContext, Future, Promise as SPromise}
 final class MithrilAsyncRuntime(
     val abi: WbindgenAbi,
     closureHashes: MithrilAsyncRuntime.ClosureHashes =
-        MithrilAsyncRuntime.ClosureHashes.Release0_10_4
+        MithrilAsyncRuntime.ClosureHashes.Release0_10_4,
+    onFetch: MithrilAsyncRuntime.FetchEvent => Unit = _ => ()
 ) {
 
     @volatile private var currentInstance: Instance = null.asInstanceOf[Instance]
@@ -45,6 +46,19 @@ final class MithrilAsyncRuntime(
     private val dispatcher = Executors.newSingleThreadExecutor(new ThreadFactory {
         def newThread(r: Runnable): Thread = {
             val t = new Thread(r, "mithril-wasm-dispatcher")
+            t.setDaemon(true)
+            t
+        }
+    })
+
+    /** Real-clock timer for `setTimeout`. Without this, the Rust async runtime's
+      * `setTimeout(cb, ms)` calls would degenerate into immediate microtasks (busy-loop), since
+      * the runtime uses setTimeout for backoff / yield / poll-interval semantics. Posts back to
+      * the WASM dispatcher when fired so single-thread invariants on `currentInstance` hold.
+      */
+    private val timer = Executors.newSingleThreadScheduledExecutor(new ThreadFactory {
+        def newThread(r: Runnable): Thread = {
+            val t = new Thread(r, "mithril-wasm-timer")
             t.setDaemon(true)
             t
         }
@@ -63,7 +77,10 @@ final class MithrilAsyncRuntime(
     /** Release the dispatcher thread. Idempotent. Subsequent `submit` / `awaitPromise` calls will
       * be rejected by the executor.
       */
-    def close(): Unit = dispatcher.shutdown()
+    def close(): Unit = {
+        dispatcher.shutdown()
+        timer.shutdown()
+    }
 
     /** Submit `body` for execution on the dispatcher thread; drain microtasks before returning its
       * result.
@@ -199,6 +216,18 @@ final class MithrilAsyncRuntime(
                         MithrilAsyncRuntime.logger.error(s"microtask failed: ${t.getMessage}", t)
                 }
                 drained += 1
+                if MithrilAsyncRuntime.profileEnabled then {
+                    val total = MithrilAsyncRuntime.totalMicrotasksDrained.incrementAndGet()
+                    if (total & 0xfff) == 0L then {
+                        val elapsed = System.currentTimeMillis() - MithrilAsyncRuntime.startMillis
+                        MithrilAsyncRuntime.logger.debug(
+                          f"[mithril-prof @ ${elapsed / 1000}%4ds] microtasks-drained=$total%d " +
+                              f"queue-size=${microtasks.size}%d setTimeout=${MithrilAsyncRuntime.setTimeoutCount.get}%d " +
+                              f"queueMicrotask=${MithrilAsyncRuntime.queueMicrotaskCount.get}%d " +
+                              f"promiseThen=${MithrilAsyncRuntime.promiseThenCount.get}%d"
+                        )
+                    }
+                }
             }
         }
     }
@@ -245,6 +274,7 @@ final class MithrilAsyncRuntime(
             def fireFulfilled(value: AnyRef | Null): Unit =
                 onFulfilled match {
                     case Some(cb) =>
+                        MithrilAsyncRuntime.promiseThenCount.incrementAndGet()
                         microtasks.add(() =>
                             try {
                                 val resultHandle = invokeClosure(
@@ -421,6 +451,7 @@ final class MithrilAsyncRuntime(
         def apply(instance: Instance, args: Array[? <: Long]): Array[Long] = {
             abi.get(args(0).toInt) match {
                 case c: JsClosure =>
+                    MithrilAsyncRuntime.queueMicrotaskCount.incrementAndGet()
                     microtasks.add(() => invokeClosure(currentInstance, c, Array.emptyLongArray))
                 case _ => ()
             }
@@ -428,14 +459,37 @@ final class MithrilAsyncRuntime(
         }
     }
 
-    /** `setTimeout(callback, ms)` — schedule as a microtask (no delay for now). Returns a dummy
-      * timer id.
+    /** `setTimeout(callback, ms)` — schedule the callback to run after `ms` milliseconds. A
+      * `ms == 0` falls through to the immediate-microtask path so we don't pay scheduler latency
+      * for the common "yield to event loop" use. For `ms > 0` we use the [[timer]] executor and
+      * post the firing back through the WASM dispatcher. Returns a dummy timer id.
+      *
+      * Earlier this handler ignored `ms` and queued every callback immediately. The Rust async
+      * runtime uses `setTimeout` for backoff / poll-interval / yield, and the immediate version
+      * busy-spun WASM at 100 % CPU forever (see jstack: stack pinned in
+      * `drainMicrotasks → invokeClosure`, no fetches firing).
       */
     private val setTimeoutHandler: WasmFunctionHandle = new WasmFunctionHandle {
         def apply(instance: Instance, args: Array[? <: Long]): Array[Long] = {
-            abi.get(args(0).toInt) match {
+            val handle = args(0).toInt
+            val delayMs = args(1).toLong
+            abi.get(handle) match {
                 case c: JsClosure =>
-                    microtasks.add(() => invokeClosure(currentInstance, c, Array.emptyLongArray))
+                    MithrilAsyncRuntime.setTimeoutCount.incrementAndGet()
+                    if delayMs <= 0L then
+                        microtasks.add { () =>
+                            invokeClosure(currentInstance, c, Array.emptyLongArray)
+                        }
+                    else
+                        timer.schedule(
+                          new Runnable {
+                              def run(): Unit = postToDispatcher {
+                                  invokeClosure(currentInstance, c, Array.emptyLongArray)
+                              }
+                          },
+                          delayMs,
+                          TimeUnit.MILLISECONDS
+                        )
                 case _ => ()
             }
             Array(abi.alloc(java.lang.Long.valueOf(args(1).toLong)).toLong)
@@ -489,7 +543,9 @@ final class MithrilAsyncRuntime(
                     MithrilAsyncRuntime.logger.debug(
                       s"fetch ${req.method.toUpperCase} ${req.url}"
                     )
-                    issueHttpRequest(req, promise)
+                    val started = System.nanoTime()
+                    safeFire(MithrilAsyncRuntime.FetchEvent.Started(req.method, req.url, started))
+                    issueHttpRequest(req, promise, started)
                 case other =>
                     postToDispatcher {
                         rejectRaw(promise, s"fetch: expected JsRequest, got $other")
@@ -499,7 +555,7 @@ final class MithrilAsyncRuntime(
         }
     }
 
-    private def issueHttpRequest(req: JsRequest, promise: JsPromise): Unit = {
+    private def issueHttpRequest(req: JsRequest, promise: JsPromise, startedNs: Long): Unit = {
         val httpReq =
             try buildHttpRequest(req)
             catch {
@@ -512,9 +568,14 @@ final class MithrilAsyncRuntime(
         httpClient
             .sendAsync(httpReq, HttpResponse.BodyHandlers.ofByteArray())
             .whenComplete { (resp, ex) =>
+                val elapsedMs = (System.nanoTime() - startedNs) / 1_000_000L
                 if ex != null then {
                     MithrilAsyncRuntime.logger.warn(
                       s"fetch ${req.url} failed: ${unwrap(ex).getMessage}"
+                    )
+                    safeFire(
+                      MithrilAsyncRuntime.FetchEvent
+                          .Failed(req.method, req.url, unwrap(ex).getMessage, elapsedMs)
                     )
                     postToDispatcher {
                         rejectRaw(promise, s"fetch failed: ${unwrap(ex).getMessage}")
@@ -523,12 +584,30 @@ final class MithrilAsyncRuntime(
                     MithrilAsyncRuntime.logger.debug(
                       s"fetch ${req.url} → ${resp.statusCode} (${resp.body.length} bytes)"
                     )
+                    safeFire(
+                      MithrilAsyncRuntime.FetchEvent.Completed(
+                        req.method,
+                        req.url,
+                        resp.statusCode,
+                        resp.body.length.toLong,
+                        elapsedMs
+                      )
+                    )
                     postToDispatcher {
                         settleWith(promise, toJsResponse(req.url, resp))
                     }
                 }
             }
     }
+
+    private def safeFire(event: MithrilAsyncRuntime.FetchEvent): Unit =
+        try onFetch(event)
+        catch {
+            case scala.util.control.NonFatal(t) =>
+                MithrilAsyncRuntime.logger.warn(
+                  s"onFetch listener threw ${t.getClass.getSimpleName}: ${t.getMessage}"
+                )
+        }
 
     private def buildHttpRequest(req: JsRequest): HttpRequest = {
         val uri = URI.create(req.url)
@@ -628,19 +707,41 @@ final class MithrilAsyncRuntime(
         p
     }
 
-    /** ReadableStream placeholders — small JSON endpoints use `.text()` / `.arrayBuffer()`, so the
-      * streaming path is dormant. Return inert values to satisfy the collision detector; real
-      * implementations land with snapshot-download integration.
+    /** ReadableStream placeholders — formerly returned inert values on the assumption "small JSON
+      * endpoints use `.text()` / `.arrayBuffer()`." That assumption is **false** for
+      * `verify_certificate_chain` (and any reqwest-driven request): the wasm-bindgen-futures
+      * runtime reads response bodies through `body.getReader()` and the BYOB stream API. With
+      * inert stubs the WASM-side reader busy-polls forever waiting for bytes we never supply —
+      * the source of the hours-long 100 % CPU we observed against a 1.4 KB cert-metadata fetch.
+      *
+      * Until the proper BYOB feeder is wired (queue chunks of `responseBytes` and signal close
+      * when drained), surface the busy-loop as a fast-failing exception rather than a hang. That
+      * way the failing call site appears in the stack trace and we know which method to
+      * implement first.
       */
-    private def stubStream(result: => Array[Long]): WasmFunctionHandle = new WasmFunctionHandle {
-        def apply(instance: Instance, args: Array[? <: Long]): Array[Long] = result
+    private def stubStream(label: String): WasmFunctionHandle = new WasmFunctionHandle {
+        def apply(instance: Instance, args: Array[? <: Long]): Array[Long] =
+            throw new RuntimeException(
+              s"unimplemented WASM stream import: $label — wasm-bindgen-futures reqwest body " +
+                  "reading needs a real ReadableStream BYOB feeder; see " +
+                  "MithrilAsyncRuntime stub comments"
+            )
     }
 
-    private val streamClose: WasmFunctionHandle = stubStream(Array.emptyLongArray)
-    private val streamEnqueue: WasmFunctionHandle = stubStream(Array.emptyLongArray)
-    private val streamByobRequest: WasmFunctionHandle = stubStream(Array(0L))
-    private val streamByobRespond: WasmFunctionHandle = stubStream(Array.emptyLongArray)
-    private val streamByobView: WasmFunctionHandle = stubStream(Array(0L))
+    private val streamClose: WasmFunctionHandle = new WasmFunctionHandle {
+        // close() is the one stream method that's safe as a no-op — it's the producer-side
+        // end-of-stream signal. If we never streamed any data in the first place, ack'ing close
+        // doesn't affect correctness. The purpose here is to step past it and surface whichever
+        // BYOB method comes NEXT — that's the one that needs a real implementation.
+        def apply(instance: Instance, args: Array[? <: Long]): Array[Long] = {
+            MithrilAsyncRuntime.logger.info(s"[stream] __wbg_close_(args=${args.length})")
+            Array.emptyLongArray
+        }
+    }
+    private val streamEnqueue: WasmFunctionHandle = stubStream("__wbg_enqueue_")
+    private val streamByobRequest: WasmFunctionHandle = stubStream("__wbg_byobRequest_")
+    private val streamByobRespond: WasmFunctionHandle = stubStream("__wbg_respond_")
+    private val streamByobView: WasmFunctionHandle = stubStream("__wbg_view_")
 }
 
 object MithrilAsyncRuntime {
@@ -675,6 +776,67 @@ object MithrilAsyncRuntime {
 
     private val logger: scribe.Logger =
         scribe.Logger("scalus.cardano.node.stream.engine.snapshot.mithril.MithrilAsyncRuntime")
+
+    /** Diagnostic counters — process-wide atomic tallies of how often each microtask-scheduling
+      * primitive fires, so we can spot busy-loop patterns without per-call logging. Sampled by
+      * the drain loop every 4096 microtasks and logged at debug level when [[profileEnabled]] is
+      * set (env `SCALUS_MITHRIL_PROFILE=1`). Not threadsafe-paranoid; approximate-correct is fine
+      * for diagnostics.
+      */
+    private[mithril] val profileEnabled: Boolean =
+        sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
+    private[mithril] val totalMicrotasksDrained: java.util.concurrent.atomic.AtomicLong =
+        new java.util.concurrent.atomic.AtomicLong(0L)
+    private[mithril] val setTimeoutCount: java.util.concurrent.atomic.AtomicLong =
+        new java.util.concurrent.atomic.AtomicLong(0L)
+    private[mithril] val queueMicrotaskCount: java.util.concurrent.atomic.AtomicLong =
+        new java.util.concurrent.atomic.AtomicLong(0L)
+    private[mithril] val promiseThenCount: java.util.concurrent.atomic.AtomicLong =
+        new java.util.concurrent.atomic.AtomicLong(0L)
+    private[mithril] val startMillis: Long = System.currentTimeMillis()
+
+    /** Observability hook for every WASM-initiated fetch — fires both when a request is dispatched
+      * and when its response settles (success or failure). Useful to surface progress during
+      * long-running operations like `verify_certificate_chain`, which walks the chain back to
+      * genesis one HTTP round-trip per hop and is otherwise opaque.
+      *
+      * Listener delivery is **not** confined to a single thread: [[FetchEvent.Started]] is
+      * emitted synchronously on the WASM dispatcher thread (inside the `fetch` import handler),
+      * while [[FetchEvent.Completed]] and [[FetchEvent.Failed]] are emitted from the JVM
+      * `HttpClient` completion callback thread. Listeners must therefore be thread-safe and must
+      * not assume serialised delivery on a single executor. Throwing inside a listener is caught
+      * and logged but does not propagate to the WASM side.
+      */
+    sealed trait FetchEvent {
+        def method: String
+        def url: String
+    }
+    object FetchEvent {
+
+        /** Issued the moment the WASM client calls `fetch(req)`. `startedNanos` is the
+          * monotonic clock value at issue time — pair with [[Completed.elapsedMs]] /
+          * [[Failed.elapsedMs]] to derive in-flight durations.
+          */
+        final case class Started(method: String, url: String, startedNanos: Long) extends FetchEvent
+
+        /** The HTTP response settled with `statusCode` and `bodyLength` bytes after `elapsedMs`
+          * milliseconds. Note: WASM-driven `verify_certificate_chain` issues these strictly
+          * sequentially, so `elapsedMs` reflects per-hop latency.
+          */
+        final case class Completed(
+            method: String,
+            url: String,
+            statusCode: Int,
+            bodyLength: Long,
+            elapsedMs: Long
+        ) extends FetchEvent
+
+        /** The HTTP request did not produce a response (network error, malformed URL, JVM
+          * HttpClient rejection). The fetch promise settles with a JS-side rejection.
+          */
+        final case class Failed(method: String, url: String, error: String, elapsedMs: Long)
+            extends FetchEvent
+    }
 
     /** Synthetic JS function produced by `new Promise(executor)` — when `resolve(v)` is called from
       * Rust, we mutate the associated [[JsPromise]] to its fulfilled state.
