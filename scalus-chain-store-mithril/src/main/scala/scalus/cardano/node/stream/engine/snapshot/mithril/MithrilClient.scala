@@ -440,12 +440,13 @@ object MithrilClient {
         aggregatorUrl: String,
         genesisVerificationKey: String,
         hashes: MithrilAsyncRuntime.ClosureHashes = MithrilAsyncRuntime.ClosureHashes.Release0_10_4,
-        onFetch: MithrilAsyncRuntime.FetchEvent => Unit = _ => ()
+        onFetch: MithrilAsyncRuntime.FetchEvent => Unit = _ => (),
+        executionListener: Option[com.dylibso.chicory.runtime.ExecutionListener] = None
     )(using ec: ExecutionContext): MithrilClient = {
         val abi = new WbindgenAbi(hashes)
         val asyncRt = new MithrilAsyncRuntime(abi, hashes, onFetch)
         val imports = abi.defaultImports ++ abi.pinnedImports ++ asyncRt.asyncImports
-        val (rt, _) = MithrilWasmRuntime.instantiate(imports)
+        val (rt, _) = MithrilWasmRuntime.instantiate(imports, executionListener)
         asyncRt.attach(rt.instance)
 
         val (aggPtr, aggLen) = rt.passString(aggregatorUrl)

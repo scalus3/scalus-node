@@ -59,21 +59,41 @@ final class MithrilVerificationProbe extends AnyFunSuite {
         // opaque) shows per-hop progress. Use `println` rather than scalatest's `info(...)`:
         // scalatest buffers `info` output until test completion, which is useless during a
         // one-hour wait — we'd never see it before the timeout.
+        // Stride between Started prints. Default 1 (print every fetch) for diagnostic runs;
+        // override with SCALUS_MITHRIL_FETCH_LOG_STRIDE=N to throttle once we know per-fetch
+        // cadence. Slow-fetch threshold is similarly tunable via SCALUS_MITHRIL_FETCH_SLOW_MS.
+        val stride = sys.env.get("SCALUS_MITHRIL_FETCH_LOG_STRIDE").map(_.toLong).getOrElse(1L)
+        val slowMs = sys.env.get("SCALUS_MITHRIL_FETCH_SLOW_MS").map(_.toLong).getOrElse(250L)
         val fetchCount = new java.util.concurrent.atomic.AtomicLong(0L)
         val onFetch: MithrilAsyncRuntime.FetchEvent => Unit = {
             case MithrilAsyncRuntime.FetchEvent.Started(_, url, _) =>
                 val n = fetchCount.incrementAndGet()
-                if n % 25 == 1L then println(f"[wasm-fetch] #$n%4d → $url")
+                if n % stride == 0L then println(f"[wasm-fetch] #$n%4d → $url")
             case MithrilAsyncRuntime.FetchEvent.Completed(_, url, status, _, ms) =>
-                if ms > 1000L then
+                if ms >= slowMs then
                     println(f"[wasm-fetch] slow ${ms}%4d ms status=$status $url")
             case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
                 println(f"[wasm-fetch] FAILED ${ms}%4d ms $url: $err")
         }
+        // Optional Chicory CALL profiler — env-gated because the per-instruction listener has
+        // measurable overhead. Set SCALUS_MITHRIL_PROFILE=1 to enable.
+        val profileEnabled = sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
+        val executionListener: Option[com.dylibso.chicory.runtime.ExecutionListener] =
+            if profileEnabled then
+                Some(
+                  new ChicoryCallProfiler(
+                    com.dylibso.chicory.wasm.Parser.parse(MithrilWasmRuntime.loadWasmBytes()),
+                    dumpEverySec = 10L,
+                    topK = 25
+                  )
+                )
+            else None
+
         val client = MithrilClient.create(
           aggregatorUrl,
           genesisVerificationKey,
-          onFetch = onFetch
+          onFetch = onFetch,
+          executionListener = executionListener
         )
         try {
             val pinnedHash = sys.env.get("SCALUS_MITHRIL_SNAPSHOT_HASH")
@@ -129,7 +149,7 @@ final class MithrilVerificationProbe extends AnyFunSuite {
             // hops, each a network round-trip + MuSig2 verification; minutes is normal.
             val tCert = System.nanoTime()
             val certificate =
-                Await.result(client.verifyCertificateChain(meta.certificateHash), 1.hour)
+                Await.result(client.verifyCertificateChain(meta.certificateHash), 3.hours)
             info(
               s"cert chain verified in ${(System.nanoTime() - tCert) / 1_000_000L}ms; " +
                   s"signed_message=${certificate.signedMessage}"
