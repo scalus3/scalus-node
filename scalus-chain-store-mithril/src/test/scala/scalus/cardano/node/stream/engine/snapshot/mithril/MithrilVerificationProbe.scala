@@ -9,7 +9,7 @@ import java.nio.file.{Files, Path}
 import scala.concurrent.duration.*
 import scala.concurrent.{Await, ExecutionContext}
 
-/** End-to-end cryptographic verification probe against the real `testing-preview` aggregator.
+/** End-to-end cryptographic verification probe against a real Mithril aggregator.
   *
   * Exercises the full chain — `MithrilClient.verifyCertificateChain` (cert-chain walk in WASM,
   * back to the genesis verification key) → `DigestsVerifier.verify` (file-level SHA-256
@@ -24,29 +24,62 @@ import scala.concurrent.{Await, ExecutionContext}
   * with `SCALUS_MITHRIL_SNAPSHOT_HASH` to verify against a previously-downloaded artifact whose
   * meta differs from the aggregator's current latest.
   *
+  * The probe defaults to the `testing-preview` aggregator. Override with `SCALUS_MITHRIL_AGGREGATOR`
+  * (full base URL ending in `/aggregator`) and `SCALUS_MITHRIL_GENESIS_KEY` (hex-encoded JSON
+  * byte array — the format Mithril publishes on its Releases page) to point the probe at preprod,
+  * mainnet, or any other aggregator. Both must be supplied together; falling back to
+  * preview defaults when only one is set would silently mix networks.
+  *
   * Invoke with:
   * {{{
   *   SCALUS_MITHRIL_VERIFY_PREVIEW=1 \
   *   SCALUS_MITHRIL_DEST=/data/preview \
   *     sbt 'scalusChainStoreMithril/testOnly *MithrilVerificationProbe'
+  *
+  *   # mainnet (genesis key from Mithril Releases page):
+  *   SCALUS_MITHRIL_VERIFY_PREVIEW=1 \
+  *   SCALUS_MITHRIL_AGGREGATOR=https://aggregator.release-mainnet.api.mithril.network/aggregator \
+  *   SCALUS_MITHRIL_GENESIS_KEY=<hex-bytes> \
+  *   SCALUS_MITHRIL_DEST=/data/mainnet \
+  *     sbt 'scalusChainStoreMithril/testOnly *MithrilVerificationProbe'
   * }}}
   */
 final class MithrilVerificationProbe extends AnyFunSuite {
 
-    private val aggregatorUrl =
+    private val DefaultPreviewAggregator =
         "https://aggregator.testing-preview.api.mithril.network/aggregator"
-    private val genesisVerificationKey =
+    private val DefaultPreviewGenesisKey =
         "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38" +
             "352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234" +
             "332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d"
 
+    /** Resolve aggregator URL + genesis key. Both must come from the same source — either both
+      * preview defaults, or both env vars — so we don't accidentally verify a mainnet snapshot
+      * against the preview genesis key (which would silently fail every cert-chain walk).
+      */
+    private def resolveNetwork(): (String, String) = {
+        val urlEnv = sys.env.get("SCALUS_MITHRIL_AGGREGATOR").filter(_.nonEmpty)
+        val keyEnv = sys.env.get("SCALUS_MITHRIL_GENESIS_KEY").filter(_.nonEmpty)
+        (urlEnv, keyEnv) match {
+            case (Some(u), Some(k)) => (u, k)
+            case (None, None)       => (DefaultPreviewAggregator, DefaultPreviewGenesisKey)
+            case (Some(_), None) =>
+                fail("SCALUS_MITHRIL_AGGREGATOR set without SCALUS_MITHRIL_GENESIS_KEY — both required")
+            case (None, Some(_)) =>
+                fail("SCALUS_MITHRIL_GENESIS_KEY set without SCALUS_MITHRIL_AGGREGATOR — both required")
+        }
+    }
+
     test(
-      "[manual] verify full preview snapshot end-to-end (requires SCALUS_MITHRIL_VERIFY_PREVIEW=1)"
+      "[manual] verify full snapshot end-to-end (requires SCALUS_MITHRIL_VERIFY_PREVIEW=1)"
     ) {
         val enabled = sys.env.get("SCALUS_MITHRIL_VERIFY_PREVIEW").contains("1")
         assume(enabled, "set SCALUS_MITHRIL_VERIFY_PREVIEW=1 to run")
 
         given ExecutionContext = ExecutionContext.global
+
+        val (aggregatorUrl, genesisVerificationKey) = resolveNetwork()
+        info(s"aggregator: $aggregatorUrl")
 
         val destDir = sys.env
             .get("SCALUS_MITHRIL_DEST")
