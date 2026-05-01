@@ -75,11 +75,10 @@ final class MithrilVerificationProbe extends AnyFunSuite {
             case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
                 println(f"[wasm-fetch] FAILED ${ms}%4d ms $url: $err")
         }
-        // Optional Chicory CALL profiler — env-gated because the per-instruction listener has
-        // measurable overhead. Set SCALUS_MITHRIL_PROFILE=1 to enable.
-        val profileEnabled = sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
+        // Optional Chicory CALL profiler — overhead is measurable; only enabled when
+        // SCALUS_MITHRIL_PROFILE=1 (same flag as the runtime's microtask sampler).
         val profiler: Option[ChicoryCallProfiler] =
-            if profileEnabled then
+            if MithrilAsyncRuntime.profileEnabled then
                 Some(
                   new ChicoryCallProfiler(
                     com.dylibso.chicory.wasm.Parser.parse(MithrilWasmRuntime.loadWasmBytes()),
