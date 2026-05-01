@@ -217,9 +217,9 @@ final class MithrilAsyncRuntime(
                 }
                 drained += 1
                 val total = MithrilAsyncRuntime.totalMicrotasksDrained.incrementAndGet()
-                if (total & 0xfff) == 0L then {
+                if MithrilAsyncRuntime.profileEnabled && (total & 0xfff) == 0L then {
                     val elapsed = System.currentTimeMillis() - MithrilAsyncRuntime.startMillis
-                    System.err.println(
+                    MithrilAsyncRuntime.logger.debug(
                       f"[mithril-prof @ ${elapsed / 1000}%4ds] microtasks-drained=$total%d " +
                           f"queue-size=${microtasks.size}%d setTimeout=${MithrilAsyncRuntime.setTimeoutCount.get}%d " +
                           f"queueMicrotask=${MithrilAsyncRuntime.queueMicrotaskCount.get}%d " +
@@ -777,9 +777,12 @@ object MithrilAsyncRuntime {
 
     /** Diagnostic counters — process-wide atomic tallies of how often each microtask-scheduling
       * primitive fires, so we can spot busy-loop patterns without per-call logging. Sampled by
-      * the drain loop every 4096 microtasks and printed to stderr. Not threadsafe-paranoid;
-      * approximate-correct is fine for diagnostics.
+      * the drain loop every 4096 microtasks and logged at debug level when [[profileEnabled]] is
+      * set (env `SCALUS_MITHRIL_PROFILE=1`). Not threadsafe-paranoid; approximate-correct is fine
+      * for diagnostics.
       */
+    private[mithril] val profileEnabled: Boolean =
+        sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
     private[mithril] val totalMicrotasksDrained: java.util.concurrent.atomic.AtomicLong =
         new java.util.concurrent.atomic.AtomicLong(0L)
     private[mithril] val setTimeoutCount: java.util.concurrent.atomic.AtomicLong =
@@ -795,8 +798,12 @@ object MithrilAsyncRuntime {
       * long-running operations like `verify_certificate_chain`, which walks the chain back to
       * genesis one HTTP round-trip per hop and is otherwise opaque.
       *
-      * Listeners run on the JVM HttpClient's completion thread; throwing inside one is caught and
-      * logged but does not propagate to the WASM side.
+      * Listener delivery is **not** confined to a single thread: [[FetchEvent.Started]] is
+      * emitted synchronously on the WASM dispatcher thread (inside the `fetch` import handler),
+      * while [[FetchEvent.Completed]] and [[FetchEvent.Failed]] are emitted from the JVM
+      * `HttpClient` completion callback thread. Listeners must therefore be thread-safe and must
+      * not assume serialised delivery on a single executor. Throwing inside a listener is caught
+      * and logged but does not propagate to the WASM side.
       */
     sealed trait FetchEvent {
         def method: String

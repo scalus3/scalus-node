@@ -78,7 +78,7 @@ final class MithrilVerificationProbe extends AnyFunSuite {
         // Optional Chicory CALL profiler — env-gated because the per-instruction listener has
         // measurable overhead. Set SCALUS_MITHRIL_PROFILE=1 to enable.
         val profileEnabled = sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
-        val executionListener: Option[com.dylibso.chicory.runtime.ExecutionListener] =
+        val profiler: Option[ChicoryCallProfiler] =
             if profileEnabled then
                 Some(
                   new ChicoryCallProfiler(
@@ -93,7 +93,7 @@ final class MithrilVerificationProbe extends AnyFunSuite {
           aggregatorUrl,
           genesisVerificationKey,
           onFetch = onFetch,
-          executionListener = executionListener
+          executionListener = profiler
         )
         try {
             val pinnedHash = sys.env.get("SCALUS_MITHRIL_SNAPSHOT_HASH")
@@ -182,7 +182,10 @@ final class MithrilVerificationProbe extends AnyFunSuite {
               s"✓ Merkle root anchored — recomputed signed_message matches certificate " +
                   s"(${(System.nanoTime() - tMerkle) / 1_000_000L}ms)"
             )
-        } finally client.close()
+        } finally {
+            try client.close()
+            finally profiler.foreach(_.close())
+        }
     }
 
     /** HEAD a candidate URL, return true on 2xx. 403 / 404 means "not retained". */
