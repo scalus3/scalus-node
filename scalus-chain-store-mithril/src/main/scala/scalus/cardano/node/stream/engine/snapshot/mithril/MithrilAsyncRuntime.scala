@@ -216,15 +216,17 @@ final class MithrilAsyncRuntime(
                         MithrilAsyncRuntime.logger.error(s"microtask failed: ${t.getMessage}", t)
                 }
                 drained += 1
-                val total = MithrilAsyncRuntime.totalMicrotasksDrained.incrementAndGet()
-                if MithrilAsyncRuntime.profileEnabled && (total & 0xfff) == 0L then {
-                    val elapsed = System.currentTimeMillis() - MithrilAsyncRuntime.startMillis
-                    MithrilAsyncRuntime.logger.debug(
-                      f"[mithril-prof @ ${elapsed / 1000}%4ds] microtasks-drained=$total%d " +
-                          f"queue-size=${microtasks.size}%d setTimeout=${MithrilAsyncRuntime.setTimeoutCount.get}%d " +
-                          f"queueMicrotask=${MithrilAsyncRuntime.queueMicrotaskCount.get}%d " +
-                          f"promiseThen=${MithrilAsyncRuntime.promiseThenCount.get}%d"
-                    )
+                if MithrilAsyncRuntime.profileEnabled then {
+                    val total = MithrilAsyncRuntime.totalMicrotasksDrained.incrementAndGet()
+                    if (total & 0xfff) == 0L then {
+                        val elapsed = System.currentTimeMillis() - MithrilAsyncRuntime.startMillis
+                        MithrilAsyncRuntime.logger.debug(
+                          f"[mithril-prof @ ${elapsed / 1000}%4ds] microtasks-drained=$total%d " +
+                              f"queue-size=${microtasks.size}%d setTimeout=${MithrilAsyncRuntime.setTimeoutCount.get}%d " +
+                              f"queueMicrotask=${MithrilAsyncRuntime.queueMicrotaskCount.get}%d " +
+                              f"promiseThen=${MithrilAsyncRuntime.promiseThenCount.get}%d"
+                        )
+                    }
                 }
             }
         }
