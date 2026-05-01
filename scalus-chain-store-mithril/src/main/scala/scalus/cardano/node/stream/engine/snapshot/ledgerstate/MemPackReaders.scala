@@ -297,8 +297,9 @@ object MemPackReaders {
       *   - Tag 2: `TxOut_AddrHash28_AdaOnly` — Credential + Addr28Extra + CompactForm Coin.
       *   - Tag 3: `TxOut_AddrHash28_AdaOnly_DataHash32` — + DataHash32 (reversed-groups 32 bytes).
       *   - Tag 4: `TxOutCompactDatum` — CompactAddr + CompactValue + Datum (inline datum).
-      *   - Tag 5: `TxOutCompactRefScript` — + Script (era-specific). **Not yet implemented** —
-      *     decoding throws [[UnsupportedTxOutVariant]]. See M10b.next RefScript follow-up.
+      *   - Tag 5: `TxOutCompactRefScript` — CompactAddr + CompactValue + Datum + Script (the
+      *     tag-3 Dijkstra PlutusV4 sub-variant of `readScript`/`readPlutusScript` is the only
+      *     piece still rejected; see [[readPlutusScript]]).
       *
       * Source: `eras/babbage/impl/.../Babbage/TxOut.hs:130-212`.
       */
