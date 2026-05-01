@@ -5,7 +5,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Address
 import scalus.cardano.ledger.{TransactionHash, TransactionInput, TransactionOutput, Value}
-import scalus.cardano.node.stream.SnapshotSource
+import scalus.cardano.node.stream.{MithrilVerificationMode, SnapshotSource, UnsupportedSourceException}
 import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
 import scalus.cardano.node.stream.engine.snapshot.{ChainStoreRestorer, MithrilSnapshotResolver}
 import scalus.cardano.node.stream.engine.snapshot.immutabledb.{
@@ -134,6 +134,32 @@ final class MithrilSnapshotResolverSpiSuite extends AnyFunSuite with ScalaFuture
                     scalus.cardano.node.stream.engine.snapshot.SnapshotError.SnapshotConfigError
                   ]
                 )
+            } finally store.close()
+        } finally Files.deleteIfExists(workDir)
+    }
+
+    test("Mithril source with verification = ScalaOnly is rejected pre-flight") {
+        // The M10e cross-platform native verifier is reserved as a config option but not yet
+        // implemented; selecting it should fail fast before any I/O.
+        val workDir = Files.createTempDirectory("mithril-scala-only-test-")
+        try {
+            val resolver = new MithrilSnapshotResolverImpl()
+            val store = new KvChainStore(InMemoryKvStore())
+            try {
+                val cause = resolver
+                    .restore(
+                      SnapshotSource.Mithril(
+                        aggregatorUrl = "https://example.com",
+                        genesisVerificationKey = "key",
+                        workDir = workDir,
+                        verification = MithrilVerificationMode.ScalaOnly
+                      ),
+                      store
+                    )
+                    .failed
+                    .futureValue
+                assert(cause.isInstanceOf[UnsupportedSourceException])
+                assert(cause.getMessage.contains("M10e"))
             } finally store.close()
         } finally Files.deleteIfExists(workDir)
     }

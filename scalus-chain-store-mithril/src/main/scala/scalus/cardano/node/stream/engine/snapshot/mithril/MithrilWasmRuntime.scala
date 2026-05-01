@@ -212,15 +212,24 @@ object MithrilWasmRuntime {
         stubbed: Int
     )
 
-    private def loadWasmBytes(): Array[Byte] = {
-        val in: InputStream = getClass.getResourceAsStream(WasmResourcePath)
-        if in == null then
-            throw new IllegalStateException(
-              s"WASM blob not found on classpath at $WasmResourcePath — " +
-                  "see src/test/resources/mithril/README.md for how to stage a pinned build."
-            )
-        try in.readAllBytes()
-        finally in.close()
+    private[mithril] def loadWasmBytes(): Array[Byte] = {
+        // Diagnostic-only escape hatch: load an alternative blob from a filesystem path. Useful
+        // for a locally-compiled `--profile dev` build where the `name` custom section is
+        // preserved (release builds strip it, leaving the profiler with `fn#NNNN` indices).
+        sys.env.get("SCALUS_MITHRIL_WASM_PATH") match {
+            case Some(path) if path.nonEmpty =>
+                logger.info(s"loading WASM from override path: $path")
+                java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path))
+            case _ =>
+                val in: InputStream = getClass.getResourceAsStream(WasmResourcePath)
+                if in == null then
+                    throw new IllegalStateException(
+                      s"WASM blob not found on classpath at $WasmResourcePath — " +
+                          "see src/test/resources/mithril/README.md for how to stage a pinned build."
+                    )
+                try in.readAllBytes()
+                finally in.close()
+        }
     }
 
     /** Default `WasmFunctionHandle` for any import the caller hasn't supplied — throws on call with

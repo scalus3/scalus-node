@@ -4,7 +4,8 @@ import cats.effect.IO
 import cats.effect.std.Dispatcher
 import cats.effect.unsafe.IORuntime
 import org.scalatest.funsuite.AnyFunSuite
-import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
+import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
+import scalus.uplc.builtin.Data
 import scalus.cardano.node.{BlockchainProvider, NetworkSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.cardano.node.stream.{StartFrom, SubscriptionOptions, SyntheticEventSource, UtxoEvent, UtxoEventQuery}
 import scalus.cardano.node.stream.engine.{Engine, EngineTestFixtures}
@@ -58,6 +59,8 @@ class BackupDelegationSuite extends AnyFunSuite {
             submittedTxs = transaction :: submittedTxs
             Future.successful(submitResult)
         }
+        override def getDatum(datumHash: DataHash): Future[Option[Data]] =
+            Future.successful(None)
     }
 
     private def withProvider[T](backup: Option[BlockchainProvider])(
