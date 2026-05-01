@@ -22,14 +22,27 @@ import scala.jdk.CollectionConverters.*
   */
 final class HotFunctionAnalysisProbe extends AnyFunSuite {
 
+    private def readClasspathBytes(resourcePath: String): Array[Byte] = {
+        val stream = Option(getClass.getResourceAsStream(resourcePath))
+            .getOrElse(fail(s"missing test resource on classpath: $resourcePath"))
+        try stream.readAllBytes()
+        finally stream.close()
+    }
+
+    private def devWasmPath: String =
+        sys.props
+            .get("mithril.dev.wasm.path")
+            .orElse(sys.env.get("MITHRIL_DEV_WASM_PATH"))
+            .getOrElse("/tmp/mithril-dev/mithril_client_wasm_bg.wasm")
+
     test("name the hot release functions via the dev blob's name section") {
-        val releasePath = "scalus-chain-store-mithril/src/test/resources/mithril/mithril_client_wasm_bg.wasm"
-        val devPath = "/tmp/mithril-dev/mithril_client_wasm_bg.wasm"
+        val releaseResourcePath = "/mithril/mithril_client_wasm_bg.wasm"
+        val devPath = devWasmPath
         if !java.nio.file.Files.exists(java.nio.file.Paths.get(devPath)) then {
-            cancel(s"dev WASM missing at $devPath — build with `cargo build --target wasm32-unknown-unknown` and `wasm-bindgen ...`")
+            cancel(s"dev WASM missing at $devPath — build with `cargo build --target wasm32-unknown-unknown` and `wasm-bindgen ...`, or override via -Dmithril.dev.wasm.path=... / MITHRIL_DEV_WASM_PATH")
         }
 
-        val release = Parser.parse(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(releasePath)))
+        val release = Parser.parse(readClasspathBytes(releaseResourcePath))
         val dev = Parser.parse(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(devPath)))
 
         val hotFns = Seq(1482, 387, 469, 136, 443, 2630, 2680, 748, 327, 246, 868)
