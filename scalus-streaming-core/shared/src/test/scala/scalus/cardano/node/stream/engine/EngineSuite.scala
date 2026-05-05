@@ -1,9 +1,11 @@
 package scalus.cardano.node.stream.engine
 
 import org.scalatest.funsuite.AnyFunSuite
-import scalus.cardano.ledger.CardanoInfo
+import scalus.cardano.ledger.{CardanoInfo, DataHash}
 import scalus.cardano.node.stream.{ChainPoint, ChainTip, UtxoEvent}
 import scalus.cardano.node.{UtxoQuery, UtxoSource}
+import scalus.uplc.builtin.Data
+import scalus.uplc.builtin.Data.dataHash
 
 import scala.concurrent.duration.*
 import scala.concurrent.Await
@@ -152,5 +154,30 @@ class EngineSuite extends AnyFunSuite {
         assert(engine.currentTip.map(_.point).contains(point(5)))
         Await.result(engine.onRollForward(block(6)), timeout)
         assert(engine.currentTip.map(_.point).contains(point(6)))
+    }
+
+    test("lookupDatum surfaces an in-window datum and forgets it after rollback") {
+        val engine = mkEngine()
+        val d: Data = Data.I(BigInt(123))
+        val h = DataHash.fromByteString(d.dataHash)
+
+        val blockWithDatum = block(1, tx(100)).copy(datums = Map(h -> d))
+        Await.result(engine.onRollForward(blockWithDatum), timeout)
+        assert(Await.result(engine.lookupDatum(h), timeout).contains(d))
+
+        Await.result(engine.onRollBackward(ChainPoint.origin), timeout)
+        assert(Await.result(engine.lookupDatum(h), timeout).isEmpty)
+    }
+
+    test("lookupDatum drops datums whose introducing block ages past the security horizon") {
+        val engine = mkEngine(securityParam = 1)
+        val d: Data = Data.I(BigInt(7))
+        val h = DataHash.fromByteString(d.dataHash)
+
+        Await.result(engine.onRollForward(block(1, tx(11)).copy(datums = Map(h -> d))), timeout)
+        assert(Await.result(engine.lookupDatum(h), timeout).contains(d))
+
+        Await.result(engine.onRollForward(block(2, tx(12))), timeout)
+        assert(Await.result(engine.lookupDatum(h), timeout).isEmpty)
     }
 }
