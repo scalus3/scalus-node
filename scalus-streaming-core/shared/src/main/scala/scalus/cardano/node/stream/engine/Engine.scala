@@ -1,9 +1,10 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, TransactionHash, TransactionInput, TransactionOutput, Utxo, Utxos}
+import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, TransactionHash, TransactionInput, TransactionOutput, Utxo, Utxos}
 import scalus.cardano.node.{BlockchainReader, TransactionStatus, UtxoQuery, UtxoQueryError}
 import scalus.cardano.node.stream.{ChainPoint, ChainTip, StartFrom, UtxoEvent}
 import scalus.cardano.node.stream.engine.persistence.{AppliedBlockSummary, BucketDelta, BucketState, EnginePersistenceStore, EngineSnapshotFile, JournalRecord, PersistedEngineState}
+import scalus.uplc.builtin.Data
 
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
@@ -105,6 +106,7 @@ final class Engine(
 
     private val rollbackBuffer = new RollbackBuffer(securityParam)
     private val txHashIndex = new TxHashIndex
+    private val datumIndex = new DatumIndex
     private val byKey = mutable.Map.empty[UtxoKey, Bucket]
     private val utxoSubs = mutable.Map.empty[Long, Engine.UtxoSubscription]
     private val tipSubs = mutable.Map.empty[Long, Mailbox[ChainTip]]
@@ -128,6 +130,15 @@ final class Engine(
 
     def txStatus(hash: TransactionHash): Future[Option[TransactionStatus]] = submit {
         txHashIndex.statusOf(hash)
+    }
+
+    /** In-window datum lookup. Returns the [[Data]] if some block currently in the rollback buffer
+      * carried the matching hash (as an inline output datum or as a witness-set entry); otherwise
+      * `None`. Callers (typically [[scalus.cardano.node.stream.BaseStreamProvider.getDatum]]) fall
+      * through to the historical-backup reader on a miss.
+      */
+    def lookupDatum(hash: DataHash): Future[Option[Data]] = submit {
+        datumIndex.get(hash)
     }
 
     /** Coverage resolution: if every key the query decomposes into has an active bucket, answer
@@ -261,9 +272,11 @@ final class Engine(
         val evicted = rollbackBuffer.applyForward(block)
         evicted.foreach { b =>
             txHashIndex.forgetBlock(b.point)
+            datumIndex.forgetBlock(b.point)
             byKey.values.foreach(_.forgetUpTo(b.point))
         }
         txHashIndex.applyForward(block)
+        datumIndex.applyForward(block.point, block.datums)
         tipRef.set(Some(block.tip))
 
         // Update every active bucket once.
@@ -317,6 +330,7 @@ final class Engine(
         rollbackBuffer.rollbackTo(to) match {
             case RollbackBuffer.RollbackOutcome.Reverted(reverted) =>
                 val revertedHashes = reverted.flatMap(_ => txHashIndex.applyBackward()).toSet
+                reverted.foreach(_ => datumIndex.applyBackward())
                 reverted.foreach(_ => byKey.values.foreach(_.applyBackward()))
                 tipRef.set(rollbackBuffer.tip)
                 if reverted.nonEmpty then {
@@ -353,6 +367,7 @@ final class Engine(
                 txStatusSubs.clear()
                 paramsSubs.clear()
                 byKey.clear()
+                datumIndex.clear()
                 tipRef.set(None)
         }
     }
@@ -488,6 +503,10 @@ final class Engine(
                 )
                 rollbackBuffer.applyForward(synthetic)
                 txHashIndex.applyForward(synthetic)
+                // Empty-datums entry keeps the index aligned with the rollback buffer so live
+                // forgetBlock / applyBackward calls land on the right perBlock head/tail. Datums
+                // themselves aren't persisted; the index repopulates as new blocks arrive.
+                datumIndex.applyForward(synthetic.point, synthetic.datums)
                 summary.bucketDeltas.foreach { case (key, delta) =>
                     byKey.get(key).foreach { b =>
                         b.history += Bucket.Delta(summary.tip.point, delta.added, delta.removed)
@@ -514,9 +533,11 @@ final class Engine(
             val evicted = rollbackBuffer.applyForward(synthetic)
             evicted.foreach { b =>
                 txHashIndex.forgetBlock(b.point)
+                datumIndex.forgetBlock(b.point)
                 byKey.values.foreach(_.forgetUpTo(b.point))
             }
             txHashIndex.applyForward(synthetic)
+            datumIndex.applyForward(synthetic.point, synthetic.datums)
             tipRef.set(Some(tip))
             deltas.foreach { case (key, delta) =>
                 val b = byKey.getOrElseUpdate(key, new Bucket(key))
@@ -529,6 +550,7 @@ final class Engine(
             rollbackBuffer.rollbackTo(to) match {
                 case RollbackBuffer.RollbackOutcome.Reverted(reverted) =>
                     reverted.foreach(_ => txHashIndex.applyBackward())
+                    reverted.foreach(_ => datumIndex.applyBackward())
                     reverted.foreach(_ => byKey.values.foreach(_.applyBackward()))
                     tipRef.set(rollbackBuffer.tip)
                 case RollbackBuffer.RollbackOutcome.PastHorizon(_) =>
@@ -536,6 +558,7 @@ final class Engine(
                     // the snapshot was sealed at a point that has since been rolled past. Drop
                     // state: the next startup after a full replay has nothing correct to keep.
                     byKey.clear()
+                    datumIndex.clear()
                     tipRef.set(None)
             }
         case JournalRecord.OwnSubmitted(h) => txHashIndex.recordOwnSubmission(h)
