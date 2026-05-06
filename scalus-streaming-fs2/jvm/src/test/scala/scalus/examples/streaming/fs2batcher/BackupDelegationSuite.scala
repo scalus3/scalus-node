@@ -208,4 +208,60 @@ class BackupDelegationSuite extends AnyFunSuite {
             case other => fail(s"expected Created seed event, got $other")
         }
     }
+
+    test("backupDiagnostics surfaces a snapshot when the backup implements the trait") {
+        given ExecutionContext = ExecutionContext.global
+        val opaqueHash = txHash(7)
+        val diagBackup = new BlockchainProvider with scalus.cardano.node.stream.BackupDiagnostics {
+            override def executionContext: ExecutionContext = summon[ExecutionContext]
+            override def cardanoInfo: CardanoInfo = ci
+            override def currentSlot: Future[SlotNo] = Future.successful(0L)
+            override def fetchLatestParams: Future[ProtocolParams] =
+                Future.successful(ci.protocolParams)
+            override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] =
+                Future.successful(Left(UtxoQueryError.NotFound(UtxoSource.FromAddress(addressA))))
+            override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =
+                Future.successful(TransactionStatus.NotFound)
+            override def submit(
+                transaction: Transaction
+            ): Future[Either[SubmitError, TransactionHash]] =
+                Future.successful(Left(NetworkSubmitError.ConnectionError("unused")))
+            override def getDatum(datumHash: DataHash): Future[Option[Data]] =
+                Future.successful(None)
+            def diagnostics: scalus.cardano.node.stream.BackupDiagnosticsSnapshot =
+                scalus.cardano.node.stream.BackupDiagnosticsSnapshot(
+                  connectedSinceMillis = 1700_000_000_000L,
+                  lastSubmittedHash = Some(opaqueHash),
+                  submitCount = 3L,
+                  rejectCount = 1L
+                )
+        }
+        val snap = withProvider(Some(diagBackup)) { (provider, _) =>
+            IO.pure(provider.backupDiagnostics)
+        }
+        assert(snap.isDefined)
+        assert(snap.get.connectedSinceMillis == 1700_000_000_000L)
+        assert(snap.get.lastSubmittedHash.contains(opaqueHash))
+        assert(snap.get.submitCount == 3L)
+        assert(snap.get.rejectCount == 1L)
+    }
+
+    test("backupDiagnostics returns None when the configured backup omits the trait") {
+        given ExecutionContext = ExecutionContext.global
+        val plainBackup = new StubBackup(
+          findUtxosResult = Left(UtxoQueryError.NotFound(UtxoSource.FromAddress(addressA))),
+          submitResult = Left(NetworkSubmitError.ConnectionError("unused"))
+        )
+        val snap = withProvider(Some(plainBackup)) { (provider, _) =>
+            IO.pure(provider.backupDiagnostics)
+        }
+        assert(snap.isEmpty)
+    }
+
+    test("backupDiagnostics returns None when no backup is configured") {
+        val snap = withProvider(None) { (provider, _) =>
+            IO.pure(provider.backupDiagnostics)
+        }
+        assert(snap.isEmpty)
+    }
 }
