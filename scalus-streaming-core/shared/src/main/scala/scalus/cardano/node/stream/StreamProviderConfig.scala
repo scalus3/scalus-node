@@ -75,10 +75,18 @@ object ChainSyncSource {
       */
     case class N2N(host: String, port: Int, networkMagic: Long) extends ChainSyncSource
 
-    /** Connect to a local cardano-node over N2C (Unix socket). Not wired until M7. String path
-      * (rather than `java.nio.file.Path`) keeps this case class JS-compatible.
+    /** Connect to a local cardano-node over Node-to-Client (Unix-domain socket). JVM-only.
+      *
+      * @param socketPath
+      *   absolute filesystem path to the cardano-node `.socket`. String (not `java.nio.file.Path`)
+      *   so the case class stays JS-compatible — the JVM provider wraps it via `Path.of(...)` at
+      *   the boundary.
+      * @param networkMagic
+      *   32-bit Cardano network identifier sent in the N2C handshake. Mainnet = 764824073, Preview =
+      *   2, Preprod = 1, yaci-devkit default = 42. Same `Long` shape as [[N2N.networkMagic]] for
+      *   symmetry.
       */
-    case class N2C(socketPath: String) extends ChainSyncSource
+    case class N2C(socketPath: String, networkMagic: Long) extends ChainSyncSource
 }
 
 /** Where the engine looks when it cannot answer a snapshot query from its own state (historical
@@ -99,6 +107,23 @@ object BackupSource {
     /** LSQ-backed `BlockchainProviderTF` over an N2C local socket. Not wired until M11.
       */
     case class LocalStateQuery(socketPath: String) extends BackupSource
+
+    /** Submit-only backup over Node-to-Client `LocalTxSubmission` (M11.P3). JVM-only.
+      *
+      * Read methods (`findUtxos`, `fetchLatestParams`, `checkTransaction`) raise
+      * `UnsupportedOperationException` until `LocalStateQuery` lands in M12 — pair with a
+      * `BackupSource.Blockfrost` for read-side coverage in the meantime, or rely on the engine's
+      * own state.
+      *
+      * @param socketPath
+      *   absolute filesystem path to the cardano-node `.socket`. Same shape as
+      *   [[ChainSyncSource.N2C.socketPath]]; configuring the same path on both shares the socket
+      *   intent (single connection sharing is a planned optimisation; today each component opens
+      *   its own).
+      * @param networkMagic
+      *   32-bit Cardano network identifier sent in the N2C handshake.
+      */
+    case class LocalNode(socketPath: String, networkMagic: Long) extends BackupSource
 
     /** Escape hatch — pass an existing `BlockchainProvider`. Useful for tests, chained providers,
       * or custom backends.

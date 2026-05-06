@@ -30,13 +30,15 @@ class BackupDelegationSuite extends AnyFunSuite {
     private final class StubBackup(
         val findUtxosResult: Either[UtxoQueryError, Utxos],
         val submitResult: Either[SubmitError, TransactionHash],
-        val checkTxResult: TransactionStatus = TransactionStatus.NotFound
+        val checkTxResult: TransactionStatus = TransactionStatus.NotFound,
+        val getDatumResult: Option[Data] = None
     )(using val ec: ExecutionContext)
         extends BlockchainProvider {
 
         var submittedTxs: List[Transaction] = Nil
         var findUtxosQueries: List[UtxoQuery] = Nil
         var checkTxCalls: List[TransactionHash] = Nil
+        var getDatumCalls: List[DataHash] = Nil
 
         override def executionContext: ExecutionContext = ec
         override def cardanoInfo: CardanoInfo = ci
@@ -59,8 +61,10 @@ class BackupDelegationSuite extends AnyFunSuite {
             submittedTxs = transaction :: submittedTxs
             Future.successful(submitResult)
         }
-        override def getDatum(datumHash: DataHash): Future[Option[Data]] =
-            Future.successful(None)
+        override def getDatum(datumHash: DataHash): Future[Option[Data]] = {
+            getDatumCalls = datumHash :: getDatumCalls
+            Future.successful(getDatumResult)
+        }
     }
 
     private def withProvider[T](backup: Option[BlockchainProvider])(
@@ -133,6 +137,52 @@ class BackupDelegationSuite extends AnyFunSuite {
                 assert(msg.contains("no backup"))
             case other => fail(s"expected ConnectionError, got $other")
         }
+    }
+
+    test("getDatum returns the in-engine datum without consulting the backup") {
+        given ExecutionContext = ExecutionContext.global
+        val backup = new StubBackup(
+          findUtxosResult = Left(UtxoQueryError.NotFound(UtxoSource.FromAddress(addressA))),
+          submitResult = Left(NetworkSubmitError.ConnectionError("unused"))
+        )
+        val datum: Data = Data.I(BigInt(99))
+        val datumHashV =
+            DataHash.fromByteString(scalus.uplc.builtin.Data.dataHash(datum))
+        val blockWithDatum =
+            block(1, tx(10)).copy(datums = Map(datumHashV -> datum))
+        val result = withProvider(Some(backup)) { (provider, _) =>
+            IO.fromFuture(IO(provider.engine.onRollForward(blockWithDatum))) >>
+                provider.getDatum(datumHashV)
+        }
+        assert(result.contains(datum))
+        assert(backup.getDatumCalls.isEmpty)
+    }
+
+    test("getDatum falls through to backup on a miss in the engine") {
+        given ExecutionContext = ExecutionContext.global
+        val datum: Data = Data.I(BigInt(7))
+        val datumHashV =
+            DataHash.fromByteString(scalus.uplc.builtin.Data.dataHash(datum))
+        val backup = new StubBackup(
+          findUtxosResult = Left(UtxoQueryError.NotFound(UtxoSource.FromAddress(addressA))),
+          submitResult = Left(NetworkSubmitError.ConnectionError("unused")),
+          getDatumResult = Some(datum)
+        )
+        val result = withProvider(Some(backup)) { (provider, _) =>
+            provider.getDatum(datumHashV)
+        }
+        assert(result.contains(datum))
+        assert(backup.getDatumCalls == List(datumHashV))
+    }
+
+    test("getDatum without a backup returns None on a miss") {
+        val datum: Data = Data.I(BigInt(11))
+        val datumHashV =
+            DataHash.fromByteString(scalus.uplc.builtin.Data.dataHash(datum))
+        val result = withProvider(None) { (provider, _) =>
+            provider.getDatum(datumHashV)
+        }
+        assert(result.isEmpty)
     }
 
     test("subscribeUtxoQuery with includeExistingUtxos=true seeds from backup") {
