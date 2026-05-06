@@ -3,6 +3,7 @@ package scalus.cardano.node.stream.ox
 import ox.flow.Flow
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.{ChainApplier, ChainApplierHandle, ClientConfig, NetworkMagic, NodeToNodeClient, NodeToNodeConnection}
+import scalus.cardano.network.n2c.{N2cChainApplier, N2cChainApplierHandle, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
 import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig, UnsupportedSourceException}
@@ -70,8 +71,8 @@ object OxBlockchainStreamProvider {
                 )
             case n: ChainSyncSource.N2N =>
                 connectN2N(config, n, persistence)
-            case ChainSyncSource.N2C(_) =>
-                throw UnsupportedSourceException("ChainSyncSource.N2C is not wired until M7")
+            case n: ChainSyncSource.N2C =>
+                connectN2C(config, n, persistence)
     }
 
     /** Synchronous snapshot bootstrap — direct-style. */
@@ -211,6 +212,49 @@ object OxBlockchainStreamProvider {
         new PeerReplaySource(
           PeerReplayConnectionFactory.forEndpoint(n.host, n.port, NetworkMagic(n.networkMagic))
         )
+
+    /** Direct-style N2C analogue of [[connectN2N]]: opens a UDS, completes the handshake, starts an
+      * [[N2cChainApplier]]. Same teardown ordering as the N2N variant.
+      */
+    private def connectN2C(
+        config: StreamProviderConfig,
+        n: ChainSyncSource.N2C,
+        persistence: EnginePersistenceStore
+    )(using ExecutionContext): OxBlockchainStreamProvider = {
+        val backup = buildBackup(config.backup)
+        bootstrapIfNeeded(config, persistence)
+        val engine = buildEngine(config, backup, persistence, config.fallbackReplaySources)
+        val conn = Await.result(
+          NodeToClientClient.connect(
+            java.nio.file.Path.of(n.socketPath),
+            NetworkMagic(n.networkMagic)
+          ),
+          Duration.Inf
+        )
+        val startFrom = engine.currentTip match {
+            case Some(tip) => StartFrom.At(tip.point)
+            case None      => StartFrom.Tip
+        }
+        val handle: N2cChainApplierHandle =
+            N2cChainApplier.spawn(conn, engine, startFrom = startFrom)
+        handle.done.onComplete {
+            case scala.util.Failure(_: scalus.cardano.infra.CancelledException) => ()
+            case scala.util.Failure(t) => engine.failAllSubscribers(t)
+            case _                     => ()
+        }
+        conn.closed.onComplete {
+            case scala.util.Failure(t) => engine.failAllSubscribers(t)
+            case _                     => engine.closeAllSubscribers()
+        }
+        val persistenceClose = persistenceTeardown(persistence, engine, config)
+        val preClose: () => Future[Unit] = () =>
+            for {
+                _ <- handle.cancel()
+                _ <- conn.close()
+                _ <- persistenceClose()
+            } yield ()
+        new OxBlockchainStreamProvider(engine, preClose)
+    }
 
     /** Test-only synthetic helper — no backup, no chain-sync. */
     def synthetic(
