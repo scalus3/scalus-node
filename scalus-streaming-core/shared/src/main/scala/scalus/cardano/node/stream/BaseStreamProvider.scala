@@ -50,6 +50,14 @@ abstract class BaseStreamProvider[F[_], C[_]](
 
     final def cardanoInfo: CardanoInfo = engine.cardanoInfo
 
+    /** Snapshot of the configured backup's diagnostic counters, if the backup implements
+      * [[BackupDiagnostics]]. Returns `None` when no backup is configured or the configured backup
+      * doesn't expose diagnostics (e.g. `BackupSource.Blockfrost` today). Useful for deployment
+      * health checks and ops dashboards.
+      */
+    final def backupDiagnostics: Option[BackupDiagnosticsSnapshot] =
+        engine.backup.collect { case d: BackupDiagnostics => d.diagnostics }
+
     // ------------------------------------------------------------------
     // Stream subscriptions
     // ------------------------------------------------------------------
