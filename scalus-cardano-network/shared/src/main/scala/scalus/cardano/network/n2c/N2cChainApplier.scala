@@ -2,9 +2,9 @@ package scalus.cardano.network.n2c
 
 import cps.*
 import cps.monads.FutureAsyncMonad
-import io.bullet.borer.Cbor
+import io.bullet.borer.{Cbor, Decoder}
 import scalus.cardano.infra.{CancelSource, CancelToken, CancelledException}
-import scalus.cardano.ledger.{BlockHash, KeepRaw, OriginalCborByteArray}
+import scalus.cardano.ledger.{BlockHash, BlockHeader, KeepRaw, OriginalCborByteArray}
 import scalus.cardano.network.chainsync.{ChainSyncDriver, ChainSyncEvent, IntersectSeeker, Point, Tip}
 import scalus.cardano.network.infra.MiniProtocolId
 import scalus.cardano.network.{BlockEnvelope, Era}
@@ -24,11 +24,9 @@ import scala.concurrent.{ExecutionContext, Future}
   *   - There is no BlockFetch on N2C — `MsgRollForward` ships the **full era-specific Block** as
   *     its payload, so we decode the block inline via [[BlockEnvelope.decodeBlock]] and skip the
   *     N2N's two-step header-then-body dance entirely.
-  *   - The `ChainPoint` for an observed Forward is built from the parsed block header. We re-encode
-  *     the header to derive the wire-canonical header CBOR; if scalus's encoder ever diverges from
-  *     the cardano-node encoder for a given era, the resulting point hash would drift from what the
-  *     peer reports on `MsgRollBackward` and rollback would miss. The `YaciN2cChainSyncSuite` IT
-  *     (and the loopback responder) is the canary on this.
+  *   - The `ChainPoint` for an observed Forward is built from the wire-canonical header CBOR bytes
+  *     captured via `KeepRaw[BlockHeader]` against the original block payload. No re-encoding — the
+  *     hash is computed against exactly the bytes the peer wrote.
   *
   * Cancellation, back-pressure, and lifecycle mirror the N2N applier — the same `applierScope`
   * convention applies, the `done` future captures the loop's terminal state, and `close()` on the
@@ -87,28 +85,20 @@ private final class N2cChainApplier(
         blockBytes: ByteString,
         peerTip: Tip
     ): Future[Unit] = async[Future] {
-        val blockRaw: KeepRaw[?] = BlockEnvelope.decodeBlock(Era.fromWire(era), blockBytes) match {
+        val blockRaw = BlockEnvelope.decodeBlock(Era.fromWire(era), blockBytes) match {
             case Left(err) => throw err
             case Right(b)  => b
         }
-        // Re-encode the header to derive the wire-canonical bytes for the point hash. See the
-        // class scaladoc on the canary.
-        val block = blockRaw.value.asInstanceOf[scalus.cardano.ledger.Block]
-        val headerBytes = ByteString.fromArray(Cbor.encode(block.header).toByteArray)
-        val hash = BlockHash.fromByteString(platform.blake2b_256(headerBytes))
-        val point = ChainPoint(block.header.slot, hash)
-        val tip = ChainTip(point, block.header.blockNumber)
+        val headerRaw = N2cChainApplier.readHeaderKeepRaw(blockBytes)
+        val hash = BlockHash.fromByteString(
+          platform.blake2b_256(ByteString.fromArray(headerRaw.raw))
+        )
+        val point = ChainPoint(headerRaw.value.slot, hash)
+        val tip = ChainTip(point, headerRaw.value.blockNumber)
 
         logger.debug(s"RollForward block @ $point (peer tip $peerTip)")
 
-        // OriginalCborByteArray is already set up by BlockEnvelope.decodeBlock — reuse the
-        // same projection helper as the N2N applier so both paths produce identical
-        // AppliedBlock shapes.
-        given OriginalCborByteArray = OriginalCborByteArray(blockBytes.bytes)
-        val applied = AppliedBlock.fromRaw(
-          tip,
-          blockRaw.asInstanceOf[KeepRaw[scalus.cardano.ledger.Block]]
-        )
+        val applied = AppliedBlock.fromRaw(tip, blockRaw)
         await(engine.onRollForward(applied))
     }
 }
@@ -142,5 +132,21 @@ object N2cChainApplier {
         val applier = new N2cChainApplier(conn, engine, applierScope.token, logger)
         val done = applier.run(startFrom)
         new N2cChainApplierHandle(applierScope, done)
+    }
+
+    /** Re-decode the block payload just far enough to capture `KeepRaw[BlockHeader]` — the wire
+      * shape is `array(5) [header, txBodies, witnessSets, auxData, invalidTxs]`, so we read the
+      * outer array header and the first field. The KeepRaw decoder snapshots the underlying byte
+      * range for `header` directly off the original payload, so the hash we compute is bit-exact
+      * with what the peer signed.
+      */
+    private[n2c] def readHeaderKeepRaw(blockBytes: ByteString): KeepRaw[BlockHeader] = {
+        given OriginalCborByteArray = OriginalCborByteArray(blockBytes.bytes)
+        val r = Cbor.reader(blockBytes.bytes)
+        r.readArrayHeader()
+        // Use the summoned Decoder explicitly — Borer's `Reader.read[T]` has overload variants
+        // (e.g. one that requires a `Factory` for collection-shaped T) that the compiler picks
+        // up when T is parameterised, masking the KeepRaw given.
+        summon[Decoder[KeepRaw[BlockHeader]]].read(r)
     }
 }
