@@ -108,6 +108,23 @@ object BackupSource {
       */
     case class LocalStateQuery(socketPath: String) extends BackupSource
 
+    /** Submit-only backup over Node-to-Client `LocalTxSubmission` (M11.P3). JVM-only.
+      *
+      * Read methods (`findUtxos`, `fetchLatestParams`, `checkTransaction`) raise
+      * `UnsupportedOperationException` until `LocalStateQuery` lands in M12 — pair with a
+      * `BackupSource.Blockfrost` for read-side coverage in the meantime, or rely on the engine's
+      * own state.
+      *
+      * @param socketPath
+      *   absolute filesystem path to the cardano-node `.socket`. Same shape as
+      *   [[ChainSyncSource.N2C.socketPath]]; configuring the same path on both shares the socket
+      *   intent (single connection sharing is a planned optimisation; today each component opens
+      *   its own).
+      * @param networkMagic
+      *   32-bit Cardano network identifier sent in the N2C handshake.
+      */
+    case class LocalNode(socketPath: String, networkMagic: Long) extends BackupSource
+
     /** Escape hatch — pass an existing `BlockchainProvider`. Useful for tests, chained providers,
       * or custom backends.
       */

@@ -61,7 +61,7 @@ object OxBlockchainStreamProvider {
         val persistence = resolvePersistence(config)
         config.chainSync match
             case ChainSyncSource.Synthetic =>
-                val backup = buildBackup(config.backup)
+                val backup = buildBackup(config.backup, config.cardanoInfo)
                 bootstrapIfNeeded(config, persistence)
                 val engine =
                     buildEngine(config, backup, persistence, config.fallbackReplaySources)
@@ -162,7 +162,7 @@ object OxBlockchainStreamProvider {
         n: ChainSyncSource.N2N,
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
-        val backup = buildBackup(config.backup)
+        val backup = buildBackup(config.backup, config.cardanoInfo)
         bootstrapIfNeeded(config, persistence)
         val fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
         val engine = buildEngine(config, backup, persistence, fallbacks)
@@ -221,7 +221,7 @@ object OxBlockchainStreamProvider {
         n: ChainSyncSource.N2C,
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
-        val backup = buildBackup(config.backup)
+        val backup = buildBackup(config.backup, config.cardanoInfo)
         bootstrapIfNeeded(config, persistence)
         val engine = buildEngine(config, backup, persistence, config.fallbackReplaySources)
         val conn = Await.result(
@@ -266,7 +266,8 @@ object OxBlockchainStreamProvider {
     }
 
     private def buildBackup(
-        source: BackupSource
+        source: BackupSource,
+        cardanoInfo: CardanoInfo
     )(using ExecutionContext): Option[BlockchainProvider] = source match
         case BackupSource.Blockfrost(apiKey, network, maxConcurrent) =>
             val fut = network match
@@ -274,8 +275,19 @@ object OxBlockchainStreamProvider {
                 case BlockfrostNetwork.Preview => BlockfrostProvider.preview(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preprod => BlockfrostProvider.preprod(apiKey, maxConcurrent)
             Some(Await.result(fut, Duration.Inf))
+        case BackupSource.LocalNode(socketPath, networkMagic) =>
+            Some(
+              Await.result(
+                scalus.cardano.network.n2c.LocalNodeProvider.connect(
+                  java.nio.file.Path.of(socketPath),
+                  scalus.cardano.network.NetworkMagic(networkMagic),
+                  cardanoInfo
+                ),
+                Duration.Inf
+              )
+            )
         case BackupSource.Custom(provider) => Some(provider)
         case BackupSource.NoBackup         => None
         case BackupSource.LocalStateQuery(_) =>
-            throw UnsupportedSourceException("BackupSource.LocalStateQuery is not wired until M11")
+            throw UnsupportedSourceException("BackupSource.LocalStateQuery is not wired until M12")
 }
