@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.std.Dispatcher
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.{ChainApplier, ClientConfig, NetworkMagic, NodeToNodeClient, NodeToNodeConnection}
+import scalus.cardano.network.n2c.{N2cChainApplier, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
 import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig, UnsupportedSourceException}
@@ -52,7 +53,7 @@ object Fs2BlockchainStreamProvider {
         config.chainSync match
             case ChainSyncSource.Synthetic =>
                 for {
-                    backup <- buildBackup(config.backup)
+                    backup <- buildBackup(config.backup, config.cardanoInfo)
                     _ <- bootstrapIfNeeded(config, persistence)
                     engine <- buildEngine(config, backup, persistence, config.fallbackReplaySources)
                 } yield new Fs2BlockchainStreamProvider(
@@ -61,10 +62,8 @@ object Fs2BlockchainStreamProvider {
                 )
             case n: ChainSyncSource.N2N =>
                 connectN2N(config, n, persistence)
-            case ChainSyncSource.N2C(_) =>
-                IO.raiseError(
-                  UnsupportedSourceException("ChainSyncSource.N2C is not wired until M7")
-                )
+            case n: ChainSyncSource.N2C =>
+                connectN2C(config, n, persistence)
     }
 
     /** Run the snapshot-bootstrap path when the config has a source AND the engine has no warm
@@ -188,7 +187,7 @@ object Fs2BlockchainStreamProvider {
         persistence: EnginePersistenceStore
     )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
         for {
-            backup <- buildBackup(config.backup)
+            backup <- buildBackup(config.backup, config.cardanoInfo)
             _ <- bootstrapIfNeeded(config, persistence)
             fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
             engine <- buildEngine(config, backup, persistence, fallbacks)
@@ -236,6 +235,49 @@ object Fs2BlockchainStreamProvider {
           PeerReplayConnectionFactory.forEndpoint(n.host, n.port, NetworkMagic(n.networkMagic))
         )
 
+    /** N2C analogue of [[connectN2N]]: opens a Unix-domain socket to the local cardano-node, runs
+      * the N2C handshake, and starts an [[N2cChainApplier]] driving the engine. Lifecycle teardown
+      * mirrors the N2N path — applier cancel + connection close run before subscribers are torn
+      * down.
+      */
+    private def connectN2C(
+        config: StreamProviderConfig,
+        n: ChainSyncSource.N2C,
+        persistence: EnginePersistenceStore
+    )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
+        for {
+            backup <- buildBackup(config.backup, config.cardanoInfo)
+            _ <- bootstrapIfNeeded(config, persistence)
+            engine <- buildEngine(config, backup, persistence, config.fallbackReplaySources)
+            conn <- IO.fromFuture(
+              IO(
+                NodeToClientClient.connect(
+                  java.nio.file.Path.of(n.socketPath),
+                  NetworkMagic(n.networkMagic)
+                )
+              )
+            )
+            startFrom = engine.currentTip match {
+                case Some(tip) => StartFrom.At(tip.point)
+                case None      => StartFrom.Tip
+            }
+            handle = N2cChainApplier.spawn(conn, engine, startFrom = startFrom)
+            _ = handle.done.onComplete {
+                case scala.util.Failure(_: scalus.cardano.infra.CancelledException) => ()
+                case scala.util.Failure(t) => engine.failAllSubscribers(t)
+                case _                     => ()
+            }
+            _ = conn.closed.onComplete {
+                case scala.util.Failure(t) => engine.failAllSubscribers(t)
+                case _                     => engine.closeAllSubscribers()
+            }
+        } yield {
+            val persistenceClose = persistenceTeardown(persistence, engine, config)
+            val preClose: () => Future[Unit] = () =>
+                handle.cancel().flatMap(_ => conn.close()).flatMap(_ => persistenceClose())
+            new Fs2BlockchainStreamProvider(engine, preClose)
+        }
+
     /** Test-only synthetic helper — no backup, no chain-sync. */
     def synthetic(
         cardanoInfo: CardanoInfo,
@@ -246,7 +288,8 @@ object Fs2BlockchainStreamProvider {
     }
 
     private def buildBackup(
-        source: BackupSource
+        source: BackupSource,
+        cardanoInfo: CardanoInfo
     )(using ExecutionContext): IO[Option[BlockchainProvider]] = source match
         case BackupSource.Blockfrost(apiKey, network, maxConcurrent) =>
             IO.fromFuture(IO(network match {
@@ -254,12 +297,22 @@ object Fs2BlockchainStreamProvider {
                 case BlockfrostNetwork.Preview => BlockfrostProvider.preview(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preprod => BlockfrostProvider.preprod(apiKey, maxConcurrent)
             })).map(Some(_))
+        case BackupSource.LocalNode(socketPath, networkMagic) =>
+            IO.fromFuture(
+              IO(
+                scalus.cardano.network.n2c.LocalNodeProvider.connect(
+                  java.nio.file.Path.of(socketPath),
+                  scalus.cardano.network.NetworkMagic(networkMagic),
+                  cardanoInfo
+                )
+              )
+            ).map(Some(_))
         case BackupSource.Custom(provider) =>
             IO.pure(Some(provider))
         case BackupSource.NoBackup =>
             IO.pure(None)
         case BackupSource.LocalStateQuery(_) =>
             IO.raiseError(
-              UnsupportedSourceException("BackupSource.LocalStateQuery is not wired until M11")
+              UnsupportedSourceException("BackupSource.LocalStateQuery is not wired until M12")
             )
 }

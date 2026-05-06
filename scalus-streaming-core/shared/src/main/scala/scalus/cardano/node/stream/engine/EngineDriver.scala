@@ -1,8 +1,8 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.cardano.ledger.{BlockHash, SlotNo, Transaction, TransactionHash}
+import scalus.cardano.ledger.{BlockHash, DataHash, SlotNo, Transaction, TransactionHash}
 import scalus.cardano.node.stream.{ChainPoint, ChainTip}
-import scalus.uplc.builtin.ByteString
+import scalus.uplc.builtin.{ByteString, Data}
 
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicLong
@@ -77,13 +77,15 @@ object EngineDriver {
         val slot: SlotNo = blockNo
         val point = ChainPoint(slot, syntheticBlockHash(blockNo))
         val tip = ChainTip(point, blockNo)
+        val datums = scala.collection.mutable.Map.empty[DataHash, Data]
         val applied = txs.map { (tx, hash) =>
+            AppliedBlock.collectDatums(tx, datums)
             AppliedTransaction(
               id = hash,
               inputs = tx.body.value.inputs.toSet,
               outputs = tx.body.value.outputs.map(_.value).toIndexedSeq
             )
         }
-        AppliedBlock(tip, applied)
+        AppliedBlock(tip, applied, datums.toMap)
     }
 }

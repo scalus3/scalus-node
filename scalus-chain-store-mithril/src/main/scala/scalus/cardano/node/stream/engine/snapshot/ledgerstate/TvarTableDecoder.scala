@@ -21,24 +21,24 @@ import java.io.InputStream
   *   ]
   * }}}
   *
-  * The map is either finite-length (bulk writer path via `implTakeHandleSnapshot`) or
-  * indefinite (streaming writer path via `sinkInMemoryS`). This decoder handles both.
+  * The map is either finite-length (bulk writer path via `implTakeHandleSnapshot`) or indefinite
+  * (streaming writer path via `sinkInMemoryS`). This decoder handles both.
   *
-  * Each map key and each map value is a CBOR `bytes` item whose payload is a MemPack-packed
-  * record — we hand the bytes to [[MemPackReaders.readTxIn]] / [[MemPackReaders.readTxOut]].
+  * Each map key and each map value is a CBOR `bytes` item whose payload is a MemPack-packed record
+  * — we hand the bytes to [[MemPackReaders.readTxIn]] / [[MemPackReaders.readTxOut]].
   *
   * ==Memory profile==
   *
-  * Mainnet `tables/tvar` is ~1-2 GB uncompressed. The [[stream]] method yields one
-  * `(TxIn, TxOut)` pair at a time; nothing beyond the Borer buffer and one pair's MemPack
-  * payload is held in memory. Callers MUST drain the iterator or call `close()` on the
-  * returned handle to release the underlying InputStream.
+  * Mainnet `tables/tvar` is ~1-2 GB uncompressed. The [[stream]] method yields one `(TxIn, TxOut)`
+  * pair at a time; nothing beyond the Borer buffer and one pair's MemPack payload is held in
+  * memory. Callers MUST drain the iterator or call `close()` on the returned handle to release the
+  * underlying InputStream.
   */
 object TvarTableDecoder {
 
-    /** Open a tvar file and return a lazy iterator of decoded `(TxIn, TxOut)` pairs along with
-      * a `close()` handle the caller is responsible for invoking (typically via a
-      * try-finally). The underlying `InputStream` stays open until `close()` runs.
+    /** Open a tvar file and return a lazy iterator of decoded `(TxIn, TxOut)` pairs along with a
+      * `close()` handle the caller is responsible for invoking (typically via a try-finally). The
+      * underlying `InputStream` stays open until `close()` runs.
       */
     def stream(input: InputStream): Handle = {
         val reader: Reader = Cbor.reader(input)
@@ -80,12 +80,61 @@ object TvarTableDecoder {
         new Handle(iter, () => input.close(), finiteLen)
     }
 
-    /** Lazy iterator + close handle. Owns the `InputStream`; callers MUST `close()` eventually
-      * (use try-finally). `expectedCount` is the map's advertised length for finite maps, or
-      * `-1` for indefinite — callers can use it as a progress baseline.
+    /** Tag-aware variant of [[stream]]: yields `(TxIn, TxOut, txOutTag)` triples. The tag is read
+      * directly from the leading byte of the MemPack-encoded TxOut bytes — no extra decode pass.
+      * Used by mainnet/preview probes that report the TxOut tag distribution alongside the restore.
+      */
+    def streamWithTags(input: InputStream): TaggedHandle = {
+        val reader: Reader = Cbor.reader(input)
+        reader.readArrayHeader(1L)
+        val finiteLen: Long =
+            if reader.tryReadMapStart() then -1L
+            else reader.readMapHeader()
+
+        val iter = new Iterator[(TransactionInput, TransactionOutput, Int)] {
+            private var yielded: Long = 0L
+            private var cachedHasNext: Option[Boolean] = None
+
+            override def hasNext: Boolean = cachedHasNext match
+                case Some(b) => b
+                case None =>
+                    val b =
+                        if finiteLen >= 0 then yielded < finiteLen
+                        else !reader.tryReadBreak()
+                    cachedHasNext = Some(b)
+                    b
+
+            override def next(): (TransactionInput, TransactionOutput, Int) = {
+                if !hasNext then throw new NoSuchElementException("tvar stream exhausted")
+                cachedHasNext = None
+                val keyBytes = reader.readByteArray()
+                val valueBytes = reader.readByteArray()
+                val txIn = MemPackReaders.readTxIn(MemPack.Reader(keyBytes))
+                val tag = if valueBytes.isEmpty then -1 else valueBytes(0).toInt & 0xff
+                val txOut = MemPackReaders.readTxOut(MemPack.Reader(valueBytes))
+                yielded += 1
+                (txIn, txOut, tag)
+            }
+        }
+
+        new TaggedHandle(iter, () => input.close(), finiteLen)
+    }
+
+    /** Lazy iterator + close handle. Owns the `InputStream`; callers MUST `close()` eventually (use
+      * try-finally). `expectedCount` is the map's advertised length for finite maps, or `-1` for
+      * indefinite — callers can use it as a progress baseline.
       */
     final class Handle private[TvarTableDecoder] (
         val iterator: Iterator[(TransactionInput, TransactionOutput)],
+        onClose: () => Unit,
+        val expectedCount: Long
+    ) extends AutoCloseable {
+        override def close(): Unit = onClose()
+    }
+
+    /** Tag-carrying twin of [[Handle]]. */
+    final class TaggedHandle private[TvarTableDecoder] (
+        val iterator: Iterator[(TransactionInput, TransactionOutput, Int)],
         onClose: () => Unit,
         val expectedCount: Long
     ) extends AutoCloseable {

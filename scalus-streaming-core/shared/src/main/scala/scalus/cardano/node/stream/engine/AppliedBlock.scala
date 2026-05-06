@@ -1,17 +1,23 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.cardano.ledger.{Block, KeepRaw, OriginalCborByteArray, TransactionHash, TransactionInput, TransactionOutput}
+import scalus.cardano.ledger.{Block, DataHash, DatumOption, KeepRaw, OriginalCborByteArray, TransactionHash, TransactionInput, TransactionOutput}
 import scalus.cardano.node.stream.{ChainPoint, ChainTip}
+import scalus.uplc.builtin.Data
 
 /** Engine-internal view of a block that has been parsed enough to be applied to the UTxO set.
   * Decouples the engine from block CBOR and witness-set details we don't care about for indexing.
   *
   * `spent` and `created` are pre-extracted from the transactions to keep the engine's inner loops
   * free of per-tx destructuring.
+  *
+  * `datums` is the union of inline output datums and witness-set `plutusData` entries observed in
+  * this block, keyed by the on-chain `DataHash`. The engine consumes it to maintain an in-memory
+  * `DataHash -> Data` index that backs `BlockchainReader.getDatum` for in-window hits.
   */
 final case class AppliedBlock(
     tip: ChainTip,
-    transactions: Seq[AppliedTransaction]
+    transactions: Seq[AppliedTransaction],
+    datums: Map[DataHash, Data] = Map.empty
 ) {
     def point: ChainPoint = tip.point
 
@@ -39,14 +45,36 @@ object AppliedBlock {
       */
     def fromRaw(tip: ChainTip, blockRaw: KeepRaw[Block]): AppliedBlock = {
         given OriginalCborByteArray = OriginalCborByteArray(blockRaw.raw)
+        val datums = scala.collection.mutable.Map.empty[DataHash, Data]
         val txs = blockRaw.value.transactions.map { tx =>
+            collectDatums(tx, datums)
             AppliedTransaction(
               id = tx.id,
               inputs = tx.body.value.inputs.toSet,
               outputs = tx.body.value.outputs.map(_.value).toIndexedSeq
             )
         }
-        AppliedBlock(tip, txs)
+        AppliedBlock(tip, txs, datums.toMap)
+    }
+
+    /** Append a transaction's inline output datums and witness-set `plutusData` entries to `into`,
+      * keyed by [[DataHash]]. Shared between [[fromRaw]] and the synthetic-emulator path so both
+      * surfaces feed the engine's in-memory datum index identically.
+      */
+    private[engine] def collectDatums(
+        tx: scalus.cardano.ledger.Transaction,
+        into: scala.collection.mutable.Map[DataHash, Data]
+    ): Unit = {
+        tx.witnessSet.plutusData.value.toSortedMap.foreach { (h, d) =>
+            into.getOrElseUpdate(h, d.value)
+        }
+        tx.body.value.outputs.foreach { sized =>
+            sized.value.datumOption match {
+                case Some(DatumOption.Inline(d)) =>
+                    into.getOrElseUpdate(DataHash.fromByteString(d.dataHash), d)
+                case _ => ()
+            }
+        }
     }
 }
 

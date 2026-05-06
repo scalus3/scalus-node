@@ -160,11 +160,13 @@ abstract class BaseStreamProvider[F[_], C[_]](
     }
 
     final def getDatum(datumHash: DataHash): F[Option[Data]] = liftFuture {
-        // Engine doesn't track datums in-memory yet; fall through to the historical-backup reader
-        // when one is configured, otherwise report not-found rather than failing the call.
-        engine.backup match {
-            case Some(bp) => bp.getDatum(datumHash)
-            case None     => Future.successful(None)
+        engine.lookupDatum(datumHash).flatMap {
+            case some @ Some(_) => Future.successful(some)
+            case None =>
+                engine.backup match {
+                    case Some(bp) => bp.getDatum(datumHash)
+                    case None     => Future.successful(None)
+                }
         }
     }
 
