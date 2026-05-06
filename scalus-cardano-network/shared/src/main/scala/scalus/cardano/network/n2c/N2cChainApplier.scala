@@ -140,7 +140,7 @@ object N2cChainApplier {
       * range for `header` directly off the original payload, so the hash we compute is bit-exact
       * with what the peer signed.
       */
-    private[n2c] def readHeaderKeepRaw(blockBytes: ByteString): KeepRaw[BlockHeader] = {
+    private def readHeaderKeepRaw(blockBytes: ByteString): KeepRaw[BlockHeader] = {
         given OriginalCborByteArray = OriginalCborByteArray(blockBytes.bytes)
         val r = Cbor.reader(blockBytes.bytes)
         r.readArrayHeader()
