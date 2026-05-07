@@ -8,10 +8,7 @@ import scalus.cardano.ledger.{TransactionHash, TransactionInput, TransactionOutp
 import scalus.cardano.node.stream.{MithrilVerificationMode, SnapshotSource, UnsupportedSourceException}
 import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
 import scalus.cardano.node.stream.engine.snapshot.{ChainStoreRestorer, MithrilSnapshotResolver}
-import scalus.cardano.node.stream.engine.snapshot.immutabledb.{
-    ImmutableDbReader,
-    ImmutableDbRealFixtureSuite
-}
+import scalus.cardano.node.stream.engine.snapshot.immutabledb.{ImmutableDbReader, ImmutableDbRealFixtureSuite}
 import scalus.cardano.node.stream.engine.KvChainStore
 
 import java.io.{ByteArrayOutputStream, FileOutputStream}
@@ -57,8 +54,11 @@ final class MithrilSnapshotResolverSpiSuite extends AnyFunSuite with ScalaFuture
               ledgerSlotDir.resolve("tables"),
               Seq(
                 mkTxIn(0x77.toByte, 1) -> TransactionOutput
-                    .Shelley(Address.fromBech32(ShelleyEnterpriseAddrBech),
-                             Value.lovelace(7_777_777L), datumHash = None)
+                    .Shelley(
+                      Address.fromBech32(ShelleyEnterpriseAddrBech),
+                      Value.lovelace(7_777_777L),
+                      datumHash = None
+                    )
               )
             )
 
@@ -95,7 +95,7 @@ final class MithrilSnapshotResolverSpiSuite extends AnyFunSuite with ScalaFuture
         val workDir = Files.createTempDirectory("mithril-range-test-")
         try {
             val resolver = new MithrilSnapshotResolverImpl()
-            val store    = new KvChainStore(InMemoryKvStore())
+            val store = new KvChainStore(InMemoryKvStore())
             try {
                 // from > to is invalid
                 val causeFromGtTo = resolver

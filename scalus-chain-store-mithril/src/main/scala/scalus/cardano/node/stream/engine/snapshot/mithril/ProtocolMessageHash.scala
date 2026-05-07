@@ -9,8 +9,8 @@ import java.security.MessageDigest
   *
   *   - iterate the parts in **enum-declaration order** of [[ProtocolMessagePartKey]] (NOT
   *     lex-by-key);
-  *   - for each `(key, value)` update the hasher with the snake_case key bytes, then with the
-  *     value bytes;
+  *   - for each `(key, value)` update the hasher with the snake_case key bytes, then with the value
+  *     bytes;
   *   - output is lowercase hex.
   *
   * The result is what every Mithril certificate puts in its `signed_message` field, so a successful

@@ -1,8 +1,8 @@
 package scalus.cardano.node.stream.engine.snapshot.mithril
 
 /** Mirror of upstream `mithril-common::entities::ProtocolMessagePartKey`. Declaration order is
-  * load-bearing — it dictates the iteration order of [[ProtocolMessageHash.compute]]. Adding a
-  * key upstream means appending a case here; reordering breaks every signature comparison.
+  * load-bearing — it dictates the iteration order of [[ProtocolMessageHash.compute]]. Adding a key
+  * upstream means appending a case here; reordering breaks every signature comparison.
   */
 enum ProtocolMessagePartKey(val snakeCase: String) {
     case SnapshotDigest extends ProtocolMessagePartKey("snapshot_digest")

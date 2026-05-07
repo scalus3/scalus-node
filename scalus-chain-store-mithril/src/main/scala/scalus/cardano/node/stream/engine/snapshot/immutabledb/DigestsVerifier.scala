@@ -107,8 +107,8 @@ object DigestsVerifier {
       * publishes after a fresh extraction — every immutable file gets a digest computed inline
       * during tar-zst expansion, eliminating a second pass over the (multi-GB) data on disk.
       *
-      * Resumed archives (those whose `.extracted` marker shortcut fired) contribute nothing to
-      * the cache, so this method still re-reads them from `immutableDir`.
+      * Resumed archives (those whose `.extracted` marker shortcut fired) contribute nothing to the
+      * cache, so this method still re-reads them from `immutableDir`.
       */
     def verifyWithCache(
         immutableDir: Path,

@@ -13,8 +13,8 @@ import scala.collection.mutable.ArrayBuffer
   * separates its own keyspaces via key-prefix bytes, so a single default column family is enough
   * and we don't pay the column-family coordination cost for the narrow benefit we'd get.
   *
-  * Not thread-safe — inherits the [[KvStore]] single-writer contract. The engine worker is the
-  * only caller.
+  * Not thread-safe — inherits the [[KvStore]] single-writer contract. The engine worker is the only
+  * caller.
   */
 final class RocksDbKvStore private (
     private val db: RocksDB,
@@ -78,7 +78,8 @@ final class RocksDbKvStore private (
         if closed then return
         closed = true
         try db.close()
-        finally try writeOptions.close()
+        finally
+            try writeOptions.close()
             finally options.close()
     }
 
@@ -89,9 +90,9 @@ object RocksDbKvStore {
 
     RocksDB.loadLibrary()
 
-    /** Open (or create) a RocksDB database at `path`. The directory is created if it doesn't
-      * exist. RocksDB's own `LOCK` file enforces single-process access — a second open against
-      * the same path from the same process (or another) fails with a typed RocksDBException.
+    /** Open (or create) a RocksDB database at `path`. The directory is created if it doesn't exist.
+      * RocksDB's own `LOCK` file enforces single-process access — a second open against the same
+      * path from the same process (or another) fails with a typed RocksDBException.
       */
     def open(path: Path): RocksDbKvStore = {
         val _ = Files.createDirectories(path)

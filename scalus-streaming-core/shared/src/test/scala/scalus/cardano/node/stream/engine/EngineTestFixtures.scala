@@ -1,8 +1,9 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.uplc.builtin.ByteString
+import scalus.uplc.builtin.{ByteString, Data}
+import scalus.uplc.builtin.Data.dataHash
 import scalus.cardano.address.Address
-import scalus.cardano.ledger.{AssetName, BlockHash, Coin, MultiAsset, PolicyId, ScriptHash, TransactionHash, TransactionInput, TransactionOutput, Value}
+import scalus.cardano.ledger.{AssetName, BlockHash, Coin, DataHash, MultiAsset, PolicyId, ScriptHash, TransactionHash, TransactionInput, TransactionOutput, Value}
 import scalus.cardano.node.stream.ChainPoint
 
 import scala.collection.immutable.SortedMap
@@ -61,6 +62,14 @@ object EngineTestFixtures {
 
     def input(txHashN: Long, index: Int): TransactionInput =
         TransactionInput(txHash(txHashN), index)
+
+    /** Deterministic `(DataHash, Data)` pair built from a small integer. Each `n` produces a
+      * distinct hash because the underlying `Data.I(n)` differs.
+      */
+    def datum(n: Int): (DataHash, Data) = {
+        val d: Data = Data.I(BigInt(n))
+        DataHash.fromByteString(d.dataHash) -> d
+    }
 
     /** Build an AppliedBlock at `slotN` from the given transactions. `blockNo` defaults to `slotN`
       * so tests don't have to track it separately — arbitrary monotonic value will do.

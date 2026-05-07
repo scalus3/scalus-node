@@ -2,14 +2,14 @@ package scalus.cardano.node.stream.engine.snapshot.ledgerstate
 
 import org.scalatest.funsuite.AnyFunSuite
 
-/** Byte-level tests against hand-built fixtures that mirror what the Haskell `Data.MemPack`
-  * library would emit. Endianness matters; every multi-byte primitive is cross-checked against a
-  * literal byte sequence.
+/** Byte-level tests against hand-built fixtures that mirror what the Haskell `Data.MemPack` library
+  * would emit. Endianness matters; every multi-byte primitive is cross-checked against a literal
+  * byte sequence.
   */
 final class MemPackSuite extends AnyFunSuite {
 
-    /** Write a non-negative `Long` as MemPack's big-endian base-128 VarLen. Used only from
-      * tests to construct fixture bytes without hard-coding every byte.
+    /** Write a non-negative `Long` as MemPack's big-endian base-128 VarLen. Used only from tests to
+      * construct fixture bytes without hard-coding every byte.
       */
     private def writeVarLen(out: java.io.ByteArrayOutputStream, value: Long): Unit = {
         require(value >= 0, s"writeVarLen: negative value $value")
@@ -25,19 +25,28 @@ final class MemPackSuite extends AnyFunSuite {
         }
     }
 
-
     test("word primitives — little-endian native order") {
         // Haskell MemPack writes via writeWord8ArrayAsWord64# (native-endian). On x86/arm that's LE.
         val bytes: Array[Byte] = Array(
           // Word8 = 0x7F
           0x7f.toByte,
           // Word16 = 0x1234 → bytes 0x34 0x12 LE
-          0x34.toByte, 0x12.toByte,
+          0x34.toByte,
+          0x12.toByte,
           // Word32 = 0x89ABCDEF → bytes 0xEF 0xCD 0xAB 0x89 LE
-          0xef.toByte, 0xcd.toByte, 0xab.toByte, 0x89.toByte,
+          0xef.toByte,
+          0xcd.toByte,
+          0xab.toByte,
+          0x89.toByte,
           // Word64 = 0x0123456789ABCDEF → bytes 0xEF 0xCD 0xAB 0x89 0x67 0x45 0x23 0x01 LE
-          0xef.toByte, 0xcd.toByte, 0xab.toByte, 0x89.toByte,
-          0x67.toByte, 0x45.toByte, 0x23.toByte, 0x01.toByte
+          0xef.toByte,
+          0xcd.toByte,
+          0xab.toByte,
+          0x89.toByte,
+          0x67.toByte,
+          0x45.toByte,
+          0x23.toByte,
+          0x01.toByte
         )
         val r = MemPack.Reader(bytes)
         assert(r.readUnsignedByte() == 0x7f)
@@ -52,7 +61,10 @@ final class MemPackSuite extends AnyFunSuite {
         //   packIntoCont7 x cont n: first byte = high 7 bits | 0x80, last byte = low 7 bits
         def roundTrip(expected: Long, bytes: Array[Byte]): Unit = {
             val r = MemPack.Reader(bytes)
-            assert(r.readVarLenWord() == expected, s"decoded value for ${bytes.mkString("[", ",", "]")}")
+            assert(
+              r.readVarLenWord() == expected,
+              s"decoded value for ${bytes.mkString("[", ",", "]")}"
+            )
             assert(r.eof)
         }
         // value 0 — single byte, high bit clear
@@ -102,8 +114,14 @@ final class MemPackSuite extends AnyFunSuite {
         //  So first group = 1 → byte 0x81 (continuation set); rest = 0x80 x8; last = 0x00.
         val negEncoded = Array[Byte](
           0x81.toByte,
-          0x80.toByte, 0x80.toByte, 0x80.toByte, 0x80.toByte,
-          0x80.toByte, 0x80.toByte, 0x80.toByte, 0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
+          0x80.toByte,
           0x00.toByte
         )
         val r = MemPack.Reader(negEncoded)
@@ -503,23 +521,32 @@ final class MemPackSuite extends AnyFunSuite {
         }
     }
 
-    test("TxOut tag 5 — PlutusV4 (Dijkstra, tag 3) is unsupported until Scalus models it") {
+    test("TxOut tag 5 — PlutusV4 (Dijkstra, tag 3) ref script round-trips") {
         val addr = scalus.cardano.address.Address.fromBech32(
           "addr_test1vzpwq95z3xyum8vqndgdd9mdnmafh3djcxnc6jemlgdmswcve6tkw"
         )
         val addrBytes = addr.toBytes.bytes
+        val plutusScriptBytes = Array[Byte](0x4d, 0x01, 0x00, 0x00, 0x33, 0x22, 0x22, 0x05)
         val out = new java.io.ByteArrayOutputStream()
         out.write(0x05)
         writeVarLen(out, addrBytes.length.toLong); out.write(addrBytes)
         out.write(0x00); writeVarLen(out, 500_000L)
-        out.write(0x00)
-        out.write(0x01) // PlutusScript
-        out.write(0x03) // PlutusScript tag 3 = V4 (Dijkstra)
-        writeVarLen(out, 1L); out.write(0x00)
-        val ex = intercept[MemPackReaders.UnsupportedTxOutVariant](
-          MemPackReaders.readTxOut(MemPack.Reader(out.toByteArray))
-        )
-        assert(ex.getMessage.contains("PlutusV4") || ex.getMessage.contains("tag 3"))
+        out.write(0x00) // Datum tag 0 = NoDatum
+        out.write(0x01) // AlonzoScript tag 1 = PlutusScript
+        out.write(0x03) // PlutusScript tag 3 = PlutusV4 (Dijkstra)
+        writeVarLen(out, plutusScriptBytes.length.toLong)
+        out.write(plutusScriptBytes)
+        val txOut = MemPackReaders.readTxOut(MemPack.Reader(out.toByteArray))
+        txOut match {
+            case scalus.cardano.ledger.TransactionOutput.Babbage(a, _, None, Some(ref)) =>
+                assert(a == addr)
+                ref.script match {
+                    case scalus.cardano.ledger.Script.PlutusV4(bs) =>
+                        assert(bs.bytes.toSeq == plutusScriptBytes.toSeq)
+                    case other => fail(s"expected PlutusV4, got $other")
+                }
+            case other => fail(s"expected Babbage with ref script, got $other")
+        }
     }
 
     test("TxOut tag 5 — native-script (Timelock) ref script") {
