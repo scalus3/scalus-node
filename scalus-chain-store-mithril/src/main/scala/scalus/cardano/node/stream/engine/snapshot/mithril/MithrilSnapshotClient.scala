@@ -9,9 +9,8 @@ import scalus.cardano.node.stream.engine.snapshot.MithrilSnapshotResolver
   */
 object MithrilSnapshotClient {
 
-    /** Direct handle on the resolver. Equivalent to
-      * `MithrilSnapshotResolver.find().get` when `scalus-chain-store-mithril` is on the classpath,
-      * but skips ServiceLoader.
+    /** Direct handle on the resolver. Equivalent to `MithrilSnapshotResolver.find().get` when
+      * `scalus-chain-store-mithril` is on the classpath, but skips ServiceLoader.
       */
     def resolver: MithrilSnapshotResolver = new MithrilSnapshotResolverImpl
 }

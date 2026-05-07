@@ -37,7 +37,9 @@ final class CardanoDatabaseVerifierSuite extends AnyFunSuite {
     test("verify succeeds when local Merkle root matches the certificate's signed_message") {
         val manifest = makeManifest(sampleEntries)
         val expectedLeaves =
-            sampleEntries.sortBy(_._1).map(_._2.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+            sampleEntries
+                .sortBy(_._1)
+                .map(_._2.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
         val expectedRootHex =
             MerkleMountainRange.computeRoot(expectedLeaves).toHex.toLowerCase
 

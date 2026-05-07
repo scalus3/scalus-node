@@ -1,18 +1,10 @@
 package scalus.cardano.node.stream.engine
 
 import org.scalatest.funsuite.AnyFunSuite
-import scalus.cardano.ledger.DataHash
-import scalus.uplc.builtin.Data
-import scalus.uplc.builtin.Data.dataHash
 
-import EngineTestFixtures.point
+import EngineTestFixtures.{datum, point}
 
 class DatumIndexSuite extends AnyFunSuite {
-
-    private def datum(n: Int): (DataHash, Data) = {
-        val d: Data = Data.I(BigInt(n))
-        DataHash.fromByteString(d.dataHash) -> d
-    }
 
     test("forward + lookup hits, backward removes") {
         val idx = new DatumIndex

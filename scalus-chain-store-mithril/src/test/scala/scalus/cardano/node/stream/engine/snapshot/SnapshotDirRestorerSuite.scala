@@ -2,27 +2,19 @@ package scalus.cardano.node.stream.engine.snapshot
 
 import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.address.Address
-import scalus.cardano.ledger.{
-    TransactionHash,
-    TransactionInput,
-    TransactionOutput,
-    Value
-}
+import scalus.cardano.ledger.{TransactionHash, TransactionInput, TransactionOutput, Value}
 import scalus.cardano.node.{UtxoQuery, UtxoSource}
 import scalus.cardano.node.stream.engine.KvChainStore
 import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
-import scalus.cardano.node.stream.engine.snapshot.immutabledb.{
-    ImmutableDbReader,
-    ImmutableDbRealFixtureSuite
-}
+import scalus.cardano.node.stream.engine.snapshot.immutabledb.{ImmutableDbReader, ImmutableDbRealFixtureSuite}
 
 import java.io.{ByteArrayOutputStream, FileOutputStream}
 import java.nio.file.{Files, Path}
 
-/** End-to-end: stage the real-fixture `immutable/` chunks alongside a hand-built
-  * `ledger/<slot>/` directory whose tip matches the ImmutableDB's last block. Run
-  * [[SnapshotDirRestorer]] and assert the UTxO set matches what we seeded (not the
-  * delta-derived set that `ImmutableDbRestorer` alone would have produced).
+/** End-to-end: stage the real-fixture `immutable/` chunks alongside a hand-built `ledger/<slot>/`
+  * directory whose tip matches the ImmutableDB's last block. Run [[SnapshotDirRestorer]] and assert
+  * the UTxO set matches what we seeded (not the delta-derived set that `ImmutableDbRestorer` alone
+  * would have produced).
   */
 final class SnapshotDirRestorerSuite extends AnyFunSuite {
 

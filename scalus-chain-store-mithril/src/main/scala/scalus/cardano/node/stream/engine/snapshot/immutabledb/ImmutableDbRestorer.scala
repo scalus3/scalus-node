@@ -19,8 +19,8 @@ import java.nio.file.Path
   * `KvChainStore.appendBlock` maintains the UTxO set via per-block deltas: for each input a block
   * spends, it looks up the prior output in the local store; if absent, the delta entry is silently
   * dropped (the "Missing-input tolerance" documented in `snapshot-bootstrap-m10.md`). When the
-  * restore does not start from genesis — which is the normal Mithril case, because aggregator
-  * CDNs retain only a rolling window of recent immutables — every input referencing a UTxO created
+  * restore does not start from genesis — which is the normal Mithril case, because aggregator CDNs
+  * retain only a rolling window of recent immutables — every input referencing a UTxO created
   * before the earliest retained chunk is missing, so its spend is dropped. The resulting UTxO set
   * contains all outputs created within the restored range with no spend pruning, which is wrong.
   *
@@ -76,8 +76,7 @@ final class ImmutableDbRestorer(store: ChainStore) {
                         // Stop at the caller's cap — used by SnapshotDirRestorer so the
                         // ImmutableDB tip matches the ledger-state snapshot's slot, which is
                         // typically a few blocks behind the last chunk's last block.
-                        if stopAtSlotInclusive.exists(cap => decoded.slot > cap) then
-                            stopped = true
+                        if stopAtSlotInclusive.exists(cap => decoded.slot > cap) then stopped = true
                         else {
                             val block = decoded.block.value
                             val tip = ChainTip(

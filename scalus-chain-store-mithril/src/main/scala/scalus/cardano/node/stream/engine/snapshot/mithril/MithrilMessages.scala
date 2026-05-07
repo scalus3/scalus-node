@@ -48,19 +48,18 @@ object MithrilMessages {
     )
 
     /** A "structured signed message" as carried in a Mithril certificate. The aggregator's
-      * cryptographically-signed `signed_message` is a SHA-256 hash over the parts in
-      * **upstream enum-declaration order** (see
-      * `mithril-common/src/entities/protocol_message.rs` `ProtocolMessagePartKey`). The hash
-      * function discovers ordering at hash time via the canonical index, so the on-the-wire
-      * map is held as a plain `Map[String, String]` and we don't depend on jsoniter preserving
-      * insertion order.
+      * cryptographically-signed `signed_message` is a SHA-256 hash over the parts in **upstream
+      * enum-declaration order** (see `mithril-common/src/entities/protocol_message.rs`
+      * `ProtocolMessagePartKey`). The hash function discovers ordering at hash time via the
+      * canonical index, so the on-the-wire map is held as a plain `Map[String, String]` and we
+      * don't depend on jsoniter preserving insertion order.
       */
     final case class ProtocolMessage(messageParts: Map[String, String])
 
     /** A verified Mithril certificate as returned by `mithrilclient_verify_certificate_chain`.
       * Mirrors upstream `CertificateMessage` — only the fields the verifier needs are typed; the
-      * rest (epoch / signed_entity_type / multi_signature / genesis_signature / metadata) are
-      * read past via `withSkipUnexpectedFields`.
+      * rest (epoch / signed_entity_type / multi_signature / genesis_signature / metadata) are read
+      * past via `withSkipUnexpectedFields`.
       */
     final case class MithrilCertificateMessage(
         hash: String,

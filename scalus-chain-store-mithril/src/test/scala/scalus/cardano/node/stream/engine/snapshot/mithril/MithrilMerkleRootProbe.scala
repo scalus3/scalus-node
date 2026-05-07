@@ -9,15 +9,15 @@ import scala.concurrent.duration.*
 import scala.concurrent.{Await, ExecutionContext}
 
 /** Fast cross-validation of the [[MerkleMountainRange]] port against the real testing-preview
-  * aggregator: fetch snapshot metadata, recompute the Cardano-Database Merkle root locally over
-  * the same digests manifest the snapshot ships, and compare against the aggregator's published
+  * aggregator: fetch snapshot metadata, recompute the Cardano-Database Merkle root locally over the
+  * same digests manifest the snapshot ships, and compare against the aggregator's published
   * `merkleRoot` field. No certificate chain walk, no WASM cryptography — runs in seconds.
   *
   * Why this works as ground-truth: `CardanoDatabaseV2Metadata.merkleRoot` is the exact value
   * `mithril-stm` produces by running its MKTree (the `ckb-merkle-mountain-range` MMR with
-  * Blake2s256 internal merge) over the digests in the manifest. If our port matches upstream's
-  * leaf encoding, ordering, internal merge, and right-to-left bagging, the recomputed root must
-  * equal the published one byte-for-byte. A mismatch dumps both hex strings so the diagnostic is
+  * Blake2s256 internal merge) over the digests in the manifest. If our port matches upstream's leaf
+  * encoding, ordering, internal merge, and right-to-left bagging, the recomputed root must equal
+  * the published one byte-for-byte. A mismatch dumps both hex strings so the diagnostic is
   * explicit.
   *
   * '''Manual.''' Tagged `[manual]` AND env-gated on `SCALUS_MITHRIL_VERIFY_PREVIEW=1`. Reuses an

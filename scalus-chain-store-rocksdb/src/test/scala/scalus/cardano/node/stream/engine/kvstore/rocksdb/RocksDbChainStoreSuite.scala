@@ -69,6 +69,26 @@ class RocksDbChainStoreSuite extends AnyFunSuite {
         }
     }
 
+    test("datum dict survives close and reopen") {
+        withTempDir { dir =>
+            val (h1, d1) = datum(1)
+            val (h2, d2) = datum(2)
+
+            val kv1 = RocksDbKvStore.open(dir)
+            val store1 = new KvChainStore(kv1)
+            store1.appendBlock(block(1, tx(100)).copy(datums = Map(h1 -> d1)))
+            store1.appendBlock(block(2, tx(101)).copy(datums = Map(h2 -> d2)))
+            store1.close()
+
+            val kv2 = RocksDbKvStore.open(dir)
+            val store2 = new KvChainStore(kv2)
+            try {
+                assert(store2.getDatumFromStore(h1).contains(d1))
+                assert(store2.getDatumFromStore(h2).contains(d2))
+            } finally store2.close()
+        }
+    }
+
     test("close is idempotent") {
         withTempDir { dir =>
             val kv = RocksDbKvStore.open(dir)

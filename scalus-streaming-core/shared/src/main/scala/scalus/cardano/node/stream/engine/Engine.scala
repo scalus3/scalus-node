@@ -107,6 +107,8 @@ final class Engine(
     private val rollbackBuffer = new RollbackBuffer(securityParam)
     private val txHashIndex = new TxHashIndex
     private val datumIndex = new DatumIndex
+    private val chainStoreDatumDict: Option[ChainStoreDatumDict] =
+        chainStore.collect { case d: ChainStoreDatumDict => d }
     private val byKey = mutable.Map.empty[UtxoKey, Bucket]
     private val utxoSubs = mutable.Map.empty[Long, Engine.UtxoSubscription]
     private val tipSubs = mutable.Map.empty[Long, Mailbox[ChainTip]]
@@ -132,13 +134,18 @@ final class Engine(
         txHashIndex.statusOf(hash)
     }
 
-    /** In-window datum lookup. Returns the [[Data]] if some block currently in the rollback buffer
-      * carried the matching hash (as an inline output datum or as a witness-set entry); otherwise
-      * `None`. Callers (typically [[scalus.cardano.node.stream.BaseStreamProvider.getDatum]]) fall
-      * through to the historical-backup reader on a miss.
+    /** Two-tier engine-local datum lookup: the in-memory [[DatumIndex]] over the volatile rollback
+      * buffer first, then the persistent [[ChainStoreDatumDict]] if the configured ChainStore
+      * implements it. Returns `None` if neither tier carries the hash, in which case
+      * [[scalus.cardano.node.stream.BaseStreamProvider.getDatum]] falls through to the configured
+      * historical-query backup.
+      *
+      * Both lookups run on the engine worker. The in-memory probe is constant-time; the persistent
+      * probe is a single point read on the underlying KvStore (RocksDB point-get on the rocksdb
+      * backend). Datums in a Cardano block are small, so even a cold disk read amortises well.
       */
     def lookupDatum(hash: DataHash): Future[Option[Data]] = submit {
-        datumIndex.get(hash)
+        datumIndex.get(hash).orElse(chainStoreDatumDict.flatMap(_.getDatumFromStore(hash)))
     }
 
     /** Coverage resolution: if every key the query decomposes into has an active bucket, answer

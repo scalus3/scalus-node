@@ -5,9 +5,9 @@ import scalus.cardano.node.stream.ChainPoint
 import scalus.cardano.node.stream.engine.KvChainStore
 import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
 
-/** End-to-end: committed preview fixture → ImmutableDbReader → HfcDiskBlockDecoder → AppliedBlock
-  * → `KvChainStore.appendBlock`. Asserts the store's tip, block count, and round-trip of the
-  * appended blocks via `blocksBetween`.
+/** End-to-end: committed preview fixture → ImmutableDbReader → HfcDiskBlockDecoder → AppliedBlock →
+  * `KvChainStore.appendBlock`. Asserts the store's tip, block count, and round-trip of the appended
+  * blocks via `blocksBetween`.
   */
 final class ImmutableDbRestorerSuite extends AnyFunSuite {
 
@@ -18,7 +18,8 @@ final class ImmutableDbRestorerSuite extends AnyFunSuite {
             try {
                 assert(store.tip.isEmpty, "fresh store should have no tip")
 
-                val progress = scala.collection.mutable.ArrayBuffer.empty[ImmutableDbRestorer.Progress]
+                val progress =
+                    scala.collection.mutable.ArrayBuffer.empty[ImmutableDbRestorer.Progress]
                 val stats = new ImmutableDbRestorer(store).restore(
                   immutableDir,
                   onProgress = p => progress += p
@@ -33,7 +34,10 @@ final class ImmutableDbRestorerSuite extends AnyFunSuite {
 
                 // Store tip must match the restorer-reported tip (KvChainStore persists .tip from
                 // each appendBlock).
-                assert(store.tip.contains(stats.tip.get), s"tip mismatch: ${store.tip} vs ${stats.tip}")
+                assert(
+                  store.tip.contains(stats.tip.get),
+                  s"tip mismatch: ${store.tip} vs ${stats.tip}"
+                )
 
                 // Round-trip: read every applied block back via blocksBetween. We use
                 // `ChainPoint.origin` as the lower bound so we see everything; upper bound is the

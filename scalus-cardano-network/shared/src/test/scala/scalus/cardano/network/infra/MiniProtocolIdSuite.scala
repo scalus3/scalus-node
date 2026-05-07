@@ -5,12 +5,18 @@ import org.scalatest.funsuite.AnyFunSuite
 class MiniProtocolIdSuite extends AnyFunSuite {
 
     test("wire numbers match the ouroboros-network protocol table") {
+        // N2N
         assert(MiniProtocolId.Handshake.wire == 0)
         assert(MiniProtocolId.ChainSync.wire == 2)
         assert(MiniProtocolId.BlockFetch.wire == 3)
         assert(MiniProtocolId.TxSubmission.wire == 4)
         assert(MiniProtocolId.KeepAlive.wire == 8)
         assert(MiniProtocolId.PeerSharing.wire == 10)
+        // N2C
+        assert(MiniProtocolId.LocalChainSync.wire == 5)
+        assert(MiniProtocolId.LocalTxSubmission.wire == 6)
+        assert(MiniProtocolId.LocalStateQuery.wire == 7)
+        assert(MiniProtocolId.LocalTxMonitor.wire == 9)
     }
 
     test("fromWire round-trips every enum variant") {
@@ -20,7 +26,7 @@ class MiniProtocolIdSuite extends AnyFunSuite {
 
     test("fromWire returns None for unassigned wire numbers") {
         assert(MiniProtocolId.fromWire(1).isEmpty) // unassigned
-        assert(MiniProtocolId.fromWire(5).isEmpty)
+        assert(MiniProtocolId.fromWire(11).isEmpty)
         assert(MiniProtocolId.fromWire(999).isEmpty)
     }
 }

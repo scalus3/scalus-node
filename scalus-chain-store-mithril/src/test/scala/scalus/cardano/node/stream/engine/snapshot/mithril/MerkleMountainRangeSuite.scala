@@ -11,8 +11,8 @@ import java.nio.charset.StandardCharsets.US_ASCII
   * implicitly the first time we point the verifier at a real Mithril snapshot — a wrong MMR root
   * would cause `signed_message` comparison to fail every time, which we'd notice immediately.
   *
-  * Leaf strings are encoded with US-ASCII rather than the platform default so the produced
-  * roots are reproducible across JVMs/locales.
+  * Leaf strings are encoded with US-ASCII rather than the platform default so the produced roots
+  * are reproducible across JVMs/locales.
   */
 final class MerkleMountainRangeSuite extends AnyFunSuite {
 
@@ -74,8 +74,9 @@ final class MerkleMountainRangeSuite extends AnyFunSuite {
         assert(MerkleMountainRange.computeRoot(ls).toSeq == expected.toSeq)
     }
 
-    /** Lifted verbatim from `mithril-common/src/crypto_helper/merkle_tree.rs::test_golden_merkle_root`.
-      * If our MMR matches upstream's `MKTree`, this hex must match byte-for-byte.
+    /** Lifted verbatim from
+      * `mithril-common/src/crypto_helper/merkle_tree.rs::test_golden_merkle_root`. If our MMR
+      * matches upstream's `MKTree`, this hex must match byte-for-byte.
       */
     test("upstream golden vector: leaves=[golden-1..golden-5]") {
         val leaves = Seq("golden-1", "golden-2", "golden-3", "golden-4", "golden-5")

@@ -2,34 +2,45 @@ package scalus.cardano.node.stream.engine.snapshot.immutabledb
 
 import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.node.stream.engine.KvChainStore
-import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
+import scalus.cardano.node.stream.engine.snapshot.ProbeKvStore
 import scalus.cardano.node.stream.engine.snapshot.TestUtils.humanBytes
 
 import java.nio.file.{Files, Path}
 
 /** Manual probe: restore the full extracted preview snapshot into a freshly-allocated
-  * `KvChainStore(InMemoryKvStore())` and print timing + final tip. Intended to confirm the
-  * decode-and-apply pipeline works at preview scale (~2.37 M blocks / ~5.35 GB of CBOR).
+  * `KvChainStore` and print timing + final tip. Intended to confirm the decode-and-apply pipeline
+  * works at preview scale (~2.37 M blocks / ~5.35 GB of CBOR).
   *
-  * Note: `InMemoryKvStore` holds everything in the JVM heap — expect ~15+ GB RSS peak on preview.
-  * For smaller scale or for RocksDB-backed restores, override by running against a tree with
-  * `SCALUS_IMMUTABLEDB_RANGE=first,last`.
+  * ==Backend selection==
+  *
+  * By default the probe uses a heap-resident `InMemoryKvStore` — expect ~15+ GB RSS peak on
+  * preview, and impossible at mainnet scale. Set
+  * [[ProbeKvStore.RocksDbDirEnv `SCALUS_RESTORE_ROCKSDB_DIR=<path>`]] to back the store with
+  * RocksDB at `<path>` instead; that directory must be empty or absent (we refuse to overwrite
+  * existing data).
   *
   * Invoke:
   * {{{
   *   SCALUS_IMMUTABLEDB_SRC=/tmp/mithrill-preview \
   *     sbt 'scalusChainStoreMithril/testOnly *ImmutableDbRestoreProbe'
+  *
+  *   # Or, RocksDB-backed (required for mainnet-scale runs):
+  *   SCALUS_IMMUTABLEDB_SRC=/tmp/mithrill-preview \
+  *   SCALUS_RESTORE_ROCKSDB_DIR=/tmp/scalus-restore-rocksdb \
+  *     sbt 'scalusChainStoreMithril/testOnly *ImmutableDbRestoreProbe'
   * }}}
   */
 final class ImmutableDbRestoreProbe extends AnyFunSuite {
 
-    test("[manual] restore preview into in-memory KvChainStore, print tip") {
+    test("[manual] restore preview into KvChainStore (in-memory or RocksDB), print tip") {
         val src = sys.env.get("SCALUS_IMMUTABLEDB_SRC").map(Path.of(_))
         assume(src.isDefined, "set SCALUS_IMMUTABLEDB_SRC=<extracted-snapshot-dir>")
         val immutable = src.get.resolve("immutable")
         assume(Files.isDirectory(immutable), s"need $immutable")
 
-        val store = new KvChainStore(InMemoryKvStore())
+        val opened = ProbeKvStore.open()
+        info(s"backend: ${opened.label}")
+        val store = new KvChainStore(opened.store)
         try {
             val stats = new ImmutableDbRestorer(store).restore(
               immutable,

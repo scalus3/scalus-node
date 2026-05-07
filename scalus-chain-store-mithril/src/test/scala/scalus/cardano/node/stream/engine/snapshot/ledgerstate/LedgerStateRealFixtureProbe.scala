@@ -10,8 +10,8 @@ import java.nio.file.{Files, Path}
   * '''Not a real test.''' Gated on `SCALUS_LEDGER_STATE_PROBE=1` and `SCALUS_MITHRIL_DEST=<dir>`
   * (or default fallback) pointing at an already-extracted snapshot parent. Skips otherwise.
   *
-  * Reports tag distribution and aborts on the first MemPack decode failure, emitting a hex
-  * dump of the offending entry so we can eyeball the mis-aligned decoder.
+  * Reports tag distribution and aborts on the first MemPack decode failure, emitting a hex dump of
+  * the offending entry so we can eyeball the mis-aligned decoder.
   *
   * Invoke:
   * {{{
@@ -80,13 +80,14 @@ final class LedgerStateRealFixtureProbe extends AnyFunSuite {
                     // For tags that carry a CompactValue (0, 1, 4, 5), the CV is right
                     // after the CompactAddr. Peek the CV tag (ada-only=0 vs multi-asset=1)
                     // so we can see the (TxOut tag, CV tag) cross-distribution.
-                    val cvTag = if (txOutTag == 0 || txOutTag == 1 || txOutTag == 4 || txOutTag == 5) then {
-                        // CompactAddr = Length (1-byte varlen for small) + N bytes.
-                        // Assume small address (<128 bytes; always true in practice).
-                        val addrLen = valueBytes(1) & 0xff
-                        val cvTagPos = 2 + addrLen
-                        if cvTagPos < valueBytes.length then valueBytes(cvTagPos) & 0xff else -2
-                    } else -1
+                    val cvTag =
+                        if txOutTag == 0 || txOutTag == 1 || txOutTag == 4 || txOutTag == 5 then {
+                            // CompactAddr = Length (1-byte varlen for small) + N bytes.
+                            // Assume small address (<128 bytes; always true in practice).
+                            val addrLen = valueBytes(1) & 0xff
+                            val cvTagPos = 2 + addrLen
+                            if cvTagPos < valueBytes.length then valueBytes(cvTagPos) & 0xff else -2
+                        } else -1
                     val shapeKey = s"tag$txOutTag,cv$cvTag"
                     byShape(shapeKey) += 1L
 

@@ -12,19 +12,19 @@ import scala.concurrent.{ExecutionContext, Future}
 
 import ChainStoreSnapshot.Record
 
-/** Drives a cold-start bootstrap: resolve a [[SnapshotSource]] to a populated [[ChainStore]]
-  * (and its optional [[ChainStoreUtxoSet]]).
+/** Drives a cold-start bootstrap: resolve a [[SnapshotSource]] to a populated [[ChainStore]] (and
+  * its optional [[ChainStoreUtxoSet]]).
   *
   * Two restore shapes coexist:
   *
   *   - **Streaming-CBOR** ([[SnapshotSource.File]] / [[SnapshotSource.Url]]) drives
-  *     [[SnapshotReader]] over the Scalus-native interchange format defined in M10.P1. One
-  *     record at a time, never materialised in full.
+  *     [[SnapshotReader]] over the Scalus-native interchange format defined in M10.P1. One record
+  *     at a time, never materialised in full.
   *   - **Mithril dir-restore** ([[SnapshotSource.Mithril]] / [[SnapshotSource.MithrilDir]])
   *     delegates to a [[MithrilSnapshotResolver]] discovered via `ServiceLoader` from
-  *     `scalus-chain-store-mithril`. The resolver knows how to download + verify a cardano-node
-  *     V2 artefact, unpack ImmutableDB chunks + the ledger-state, and populate the store via
-  *     the same `appendBlock` / `restoreUtxoSet` calls.
+  *     `scalus-chain-store-mithril`. The resolver knows how to download + verify a cardano-node V2
+  *     artefact, unpack ImmutableDB chunks + the ledger-state, and populate the store via the same
+  *     `appendBlock` / `restoreUtxoSet` calls.
   *
   * Used by the Fs2 / Ox providers at construction time when `config.bootstrap` is set and the
   * engine has no warm-restart tip. See `docs/local/claude/indexer/snapshot-bootstrap-m10.md` for

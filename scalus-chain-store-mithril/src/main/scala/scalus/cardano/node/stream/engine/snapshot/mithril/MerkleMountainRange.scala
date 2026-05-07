@@ -2,16 +2,16 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 
 import org.bouncycastle.crypto.digests.Blake2sDigest
 
-/** Merkle Mountain Range (MMR) — port of upstream `mithril-common::crypto_helper::MKTree`, which
-  * is itself a thin wrapper over `ckb-merkle-mountain-range` with **Blake2s256** as the merge
+/** Merkle Mountain Range (MMR) — port of upstream `mithril-common::crypto_helper::MKTree`, which is
+  * itself a thin wrapper over `ckb-merkle-mountain-range` with **Blake2s256** as the merge
   * primitive. Just enough functionality to compute a root over a list of leaves; we don't need
   * proof generation or membership checks for the verifier.
   *
   * ==Layout==
   *
-  * Leaves are appended left-to-right and combined into peaks. Whenever the top two peaks have
-  * equal height, they're merged into one of height+1. The MMR's "root" is the sequence of
-  * surviving peaks bagged from right to left:
+  * Leaves are appended left-to-right and combined into peaks. Whenever the top two peaks have equal
+  * height, they're merged into one of height+1. The MMR's "root" is the sequence of surviving peaks
+  * bagged from right to left:
   *
   * {{{
   * peaks = [P_k, P_{k-1}, ..., P_1, P_0]   // left-to-right, ascending heights only at boundaries
@@ -24,14 +24,14 @@ import org.bouncycastle.crypto.digests.Blake2sDigest
   *
   * ==Leaf encoding==
   *
-  * Per upstream's `From<&str> for MKTreeNode`, a hex-encoded SHA-256 digest enters the tree as
-  * the **ASCII bytes of the hex string** (e.g. `"deadbeef"` → 8 bytes), NOT as the 32 raw bytes.
+  * Per upstream's `From<&str> for MKTreeNode`, a hex-encoded SHA-256 digest enters the tree as the
+  * **ASCII bytes of the hex string** (e.g. `"deadbeef"` → 8 bytes), NOT as the 32 raw bytes.
   * Callers building the verifier need to hand in the hex strings byte-for-byte.
   */
 object MerkleMountainRange {
 
-    /** Build the MMR over `leaves` and return the root bytes. Throws on empty input — an empty
-      * MMR has no defined root in upstream either.
+    /** Build the MMR over `leaves` and return the root bytes. Throws on empty input — an empty MMR
+      * has no defined root in upstream either.
       */
     def computeRoot(leaves: Seq[Array[Byte]]): Array[Byte] = {
         require(leaves.nonEmpty, "MerkleMountainRange requires at least one leaf")

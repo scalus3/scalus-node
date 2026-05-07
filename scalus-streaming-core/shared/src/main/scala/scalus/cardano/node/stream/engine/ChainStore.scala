@@ -1,9 +1,10 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.cardano.ledger.{TransactionInput, TransactionOutput, Utxos}
+import scalus.cardano.ledger.{DataHash, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.node.UtxoQuery
 import scalus.cardano.node.stream.{ChainPoint, ChainTip}
 import scalus.cardano.node.stream.engine.replay.ReplayError
+import scalus.uplc.builtin.Data
 
 /** Pluggable durable block-history store.
   *
@@ -94,6 +95,26 @@ trait ChainStoreUtxoSet { self: ChainStore =>
         tip: ChainTip,
         utxos: Iterator[(TransactionInput, TransactionOutput)]
     ): Unit
+}
+
+/** Optional mixin for [[ChainStore]] backends that also retain a `DataHash -> Data` dictionary of
+  * every datum observed in the block history — inline output datums plus witness-set `plutusData`
+  * entries.
+  *
+  * Backs `BlockchainReader.getDatum` for hashes that aged out of the engine's volatile
+  * [[DatumIndex]] (or were witnessed before the subscriber joined) on deployments without a
+  * historical-query backup. Datums are content-addressed, so the dictionary is monotonic — a
+  * rolled-back block does not invalidate the data it contributed; if some other branch reintroduces
+  * the same hash, the value is identical. Implementations therefore do not need to remove entries
+  * on `rollbackTo`, and may share the same dictionary across forks.
+  */
+trait ChainStoreDatumDict { self: ChainStore =>
+
+    /** Look up a datum by hash. Returns `None` if no block previously committed via
+      * [[ChainStore.appendBlock]] contributed this hash, in which case the caller falls through to
+      * the configured backup.
+      */
+    def getDatumFromStore(hash: DataHash): Option[Data]
 }
 
 object ChainStore {

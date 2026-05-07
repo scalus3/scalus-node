@@ -15,9 +15,9 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
 
 /** End-to-end: build a synthetic `ledger/<slot>/{meta, state, tables/tvar}` directory where the
-  * `tables/tvar` file is a valid CBOR list-of-length-1 wrapping a finite map of MemPack-packed
-  * UTxO entries. Restore into a `KvChainStore(InMemoryKvStore())` and assert the UTxO set
-  * matches what we wrote.
+  * `tables/tvar` file is a valid CBOR list-of-length-1 wrapping a finite map of MemPack-packed UTxO
+  * entries. Restore into a `KvChainStore(InMemoryKvStore())` and assert the UTxO set matches what
+  * we wrote.
   */
 final class LedgerStateRestorerSuite extends AnyFunSuite {
 
@@ -58,7 +58,10 @@ final class LedgerStateRestorerSuite extends AnyFunSuite {
             )
 
             val tip = ChainTip(
-              ChainPoint(TipSlot, BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))),
+              ChainPoint(
+                TipSlot,
+                BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))
+              ),
               blockNo = 7L
             )
 
@@ -104,7 +107,10 @@ final class LedgerStateRestorerSuite extends AnyFunSuite {
             writeTablesFile(slotDir.resolve("tables"), Seq.empty)
 
             val wrongSlotTip = ChainTip(
-              ChainPoint(TipSlot + 1, BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))),
+              ChainPoint(
+                TipSlot + 1,
+                BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))
+              ),
               blockNo = 0L
             )
             val store = new KvChainStore(InMemoryKvStore())
@@ -130,7 +136,10 @@ final class LedgerStateRestorerSuite extends AnyFunSuite {
             writeTablesFile(slotDir.resolve("tables"), Seq.empty)
 
             val tip = ChainTip(
-              ChainPoint(TipSlot, BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))),
+              ChainPoint(
+                TipSlot,
+                BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))
+              ),
               blockNo = 0L
             )
             val store = new KvChainStore(InMemoryKvStore())
@@ -151,7 +160,10 @@ final class LedgerStateRestorerSuite extends AnyFunSuite {
             Files.write(ledgerDir.resolve(TipSlot.toString), Array[Byte](0x00))
 
             val tip = ChainTip(
-              ChainPoint(TipSlot, BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))),
+              ChainPoint(
+                TipSlot,
+                BlockHash.fromByteString(ByteString.fromArray(new Array[Byte](32)))
+              ),
               blockNo = 0L
             )
             val store = new KvChainStore(InMemoryKvStore())
@@ -199,8 +211,8 @@ final class LedgerStateRestorerSuite extends AnyFunSuite {
         finally os.close()
     }
 
-    /** Write a CBOR `bytes` item. For payloads < 24 bytes: single-byte header 0x40 | len.
-      * Otherwise use 0x58 + u8 len, or 0x59 + u16 len (BE), etc.
+    /** Write a CBOR `bytes` item. For payloads < 24 bytes: single-byte header 0x40 | len. Otherwise
+      * use 0x58 + u8 len, or 0x59 + u16 len (BE), etc.
       */
     private def writeCborBytes(out: ByteArrayOutputStream, payload: Array[Byte]): Unit = {
         val len = payload.length

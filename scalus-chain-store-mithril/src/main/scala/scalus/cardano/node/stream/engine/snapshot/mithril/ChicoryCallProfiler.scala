@@ -8,8 +8,8 @@ import java.io.{FileWriter, PrintWriter}
 import java.util.concurrent.atomic.{AtomicLong, AtomicLongArray}
 import java.util.concurrent.{Executors, ThreadFactory, TimeUnit}
 
-/** Per-instruction sampling listener that counts WASM `CALL` events by target function index,
-  * and periodically dumps a delta-rate top-K to stderr.
+/** Per-instruction sampling listener that counts WASM `CALL` events by target function index, and
+  * periodically dumps a delta-rate top-K to stderr.
   *
   * Resolution: function indices are mapped to Rust-mangled names via the embedded `name` custom
   * section (wasm-bindgen always emits one). Indices for which no name exists fall back to
@@ -24,8 +24,8 @@ import java.util.concurrent.{Executors, ThreadFactory, TimeUnit}
   *     we don't track here. Counts by *type-index* would be misleading. Practical impact: closures
   *     invoked via the function table show up at the JS-glue caller side rather than at the
   *     ultimate target, but that's still useful for narrowing down hot regions.
-  *   - We periodically print *deltas* since the previous dump, so a busy-loop manifests as the
-  *     same function dominating each window.
+  *   - We periodically print *deltas* since the previous dump, so a busy-loop manifests as the same
+  *     function dominating each window.
   */
 final class ChicoryCallProfiler(
     module: WasmModule,
@@ -34,13 +34,17 @@ final class ChicoryCallProfiler(
     outputPath: String = "/tmp/mithril-call-profile.log"
 ) extends ExecutionListener {
 
-    private val out = new PrintWriter(new FileWriter(outputPath, /*append=*/ false), /*autoFlush=*/ true)
-    out.println(s"# ChicoryCallProfiler started at ${java.time.Instant.now} (dump=${dumpEverySec}s top=$topK)")
+    private val out =
+        new PrintWriter(new FileWriter(outputPath, /*append=*/ false), /*autoFlush=*/ true)
+    out.println(
+      s"# ChicoryCallProfiler started at ${java.time.Instant.now} (dump=${dumpEverySec}s top=$topK)"
+    )
     out.flush()
 
     private val nameSection: NameCustomSection = module.nameSection()
     private val totalFns: Int = {
-        val imports = module.importSection().count(com.dylibso.chicory.wasm.types.ExternalType.FUNCTION)
+        val imports =
+            module.importSection().count(com.dylibso.chicory.wasm.types.ExternalType.FUNCTION)
         val locals = module.functionSection().functionCount()
         // Imports come first in the function index space, then defined functions.
         imports + locals

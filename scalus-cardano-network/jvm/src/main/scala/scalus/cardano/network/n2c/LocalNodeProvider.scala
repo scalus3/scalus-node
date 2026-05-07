@@ -3,6 +3,7 @@ package scalus.cardano.network.n2c
 import io.bullet.borer.Cbor
 import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
 import scalus.cardano.node.{BlockchainProvider, NodeSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError}
+import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot}
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.infra.MiniProtocolId
 import scalus.cardano.network.n2c.localtxsubmission.{LocalTxSubmissionDriver, LocalTxSubmissionRejection}
@@ -10,6 +11,7 @@ import scalus.uplc.builtin.{ByteString, Data}
 import scalus.utils.Hex.toHex
 
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{ExecutionContext, Future}
 
 /** Submit-only `BlockchainProvider` over `LocalTxSubmission` against a local cardano-node.
@@ -33,15 +35,42 @@ final class LocalNodeProvider private (
     conn: NodeToClientConnection,
     driver: LocalTxSubmissionDriver,
     val cardanoInfo: CardanoInfo,
-    submitEra: Int
+    submitEra: Int,
+    connectedSinceMillis: Long
 )(using val executionContext: ExecutionContext)
-    extends BlockchainProvider {
+    extends BlockchainProvider
+    with BackupDiagnostics {
+
+    // Single AtomicReference holds the snapshot; CAS-update on submit/reject so the
+    // BackupDiagnostics contract's "coherent point-in-time view" is real, not approximate.
+    private val diagState = new AtomicReference[BackupDiagnosticsSnapshot](
+      BackupDiagnosticsSnapshot(
+        connectedSinceMillis = connectedSinceMillis,
+        lastSubmittedHash = None,
+        submitCount = 0L,
+        rejectCount = 0L
+      )
+    )
+
+    private def updateDiag(f: BackupDiagnosticsSnapshot => BackupDiagnosticsSnapshot): Unit = {
+        @scala.annotation.tailrec
+        def loop(): Unit = {
+            val cur = diagState.get
+            val next = f(cur)
+            if !diagState.compareAndSet(cur, next) then loop()
+        }
+        loop()
+    }
 
     def submit(transaction: Transaction): Future[Either[SubmitError, TransactionHash]] = {
         val txBytes = ByteString.fromArray(Cbor.encode(transaction).toByteArray)
+        updateDiag(s => s.copy(submitCount = s.submitCount + 1L))
         driver.submit(submitEra, txBytes).map {
-            case Right(_) => Right(transaction.id)
+            case Right(_) =>
+                updateDiag(s => s.copy(lastSubmittedHash = Some(transaction.id)))
+                Right(transaction.id)
             case Left(LocalTxSubmissionRejection(rejectEra, reasonBytes)) =>
+                updateDiag(s => s.copy(rejectCount = s.rejectCount + 1L))
                 Left(
                   NodeSubmitError.ValidationError(
                     message =
@@ -51,6 +80,8 @@ final class LocalNodeProvider private (
                 )
         }
     }
+
+    def diagnostics: BackupDiagnosticsSnapshot = diagState.get
 
     /** Tear down the driver + connection. Idempotent. */
     def close(): Future[Unit] = driver.close().flatMap(_ => conn.close())
@@ -93,7 +124,13 @@ object LocalNodeProvider {
               conn.channel(MiniProtocolId.LocalTxSubmission),
               conn.rootToken
             )
-            new LocalNodeProvider(conn, driver, cardanoInfo, submitEra)
+            new LocalNodeProvider(
+              conn,
+              driver,
+              cardanoInfo,
+              submitEra,
+              connectedSinceMillis = System.currentTimeMillis()
+            )
         }
     }
 }
