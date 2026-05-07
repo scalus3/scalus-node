@@ -1,7 +1,0 @@
--- Project configuration
-
-fact Project(
-  name: "scalus-node",
-  language: "rust",
-  build: "cargo",
-  tools: ["cargo-test"])
