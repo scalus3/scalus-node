@@ -1,0 +1,140 @@
+-- The anthill.stage0 domain: entity types for project management
+--
+-- This is the standard domain shipped with anthill. The `project`, `tool`,
+-- `workitem`, and `feedback` sugar desugars to facts of these entity types.
+--
+-- This file is provided for reference. In practice, the domain is loaded
+-- automatically when stage0 sugar is used.
+
+namespace anthill.stage0
+  import anthill.prelude.{List, Option}
+  import anthill.reflect.{Term, Symbol}
+  export Project, Module, ToolDef, ToolPack, WorkItem, Feedback
+  export SourceRoot, SourceScope, ContextRef, AcceptanceCriterion
+  export SuccessCriterion, WorkStatus, Capability
+
+  -- =================================================================
+  -- Project structure
+  -- =================================================================
+
+  entity Project(
+    name       : String,
+    language   : Option[T = String],
+    build      : Option[T = String],
+    modules    : Option[T = List[T = String]],
+    sources    : Option[T = List[T = SourceRoot]],
+    tools      : List[T = String],
+    domains    : Option[T = List[T = String]]
+  )
+
+  entity Module(
+    name       : String,
+    root       : String,
+    language   : String,
+    build      : Option[T = String],
+    sources    : Option[T = List[T = SourceRoot]]
+  )
+
+  entity SourceRoot(
+    path       : String,
+    language   : Option[T = String],
+    scope      : SourceScope
+  )
+
+  enum SourceScope
+    entity Main
+    entity Test
+    entity Generated
+    entity Docs
+  end
+
+  -- =================================================================
+  -- Tool definitions and packs
+  -- =================================================================
+
+  entity ToolDef(
+    name       : String,
+    command    : String,
+    args       : Option[T = List[T = String]],
+    working_dir: Option[T = String],
+    timeout    : Option[T = Int],
+    success    : SuccessCriterion
+  )
+
+  enum SuccessCriterion
+    entity ExitZero
+    entity ExitCode(code: Int)
+    entity OutputMatches(pattern: String)
+    entity Custom(term: Term)
+  end
+
+  entity ToolPack(
+    name       : String,
+    tools      : List[T = String]
+  )
+
+  -- =================================================================
+  -- Work items
+  -- =================================================================
+
+  entity WorkItem(
+    id          : String,
+    description : Option[T = Term],
+    context     : Option[T = List[T = ContextRef]],
+    acceptance  : List[T = AcceptanceCriterion],
+    depends_on  : Option[T = List[T = String]],
+    generates   : Option[T = List[T = Term]],
+    requires_capability : Option[T = List[T = Capability]],
+    status      : WorkStatus
+  )
+
+  enum ContextRef
+    entity FileRef(path: String, lines: Option[T = String])
+    entity FactRef(domain: String, pattern: Term)
+    entity WorkItemRef(id: String)
+  end
+
+  enum AcceptanceCriterion
+    entity ToolPasses(tool: String, params: Option[T = Term])
+    entity FactHolds(domain: String, pattern: Term)
+    entity Compiles(source: SourceRoot)
+    entity Constraint(term: Term)
+  end
+
+  enum WorkStatus
+    entity Draft
+    entity Open
+    entity Claimed(agent: String, since: String)
+    entity Delivered(agent: String, at: String)
+    entity Verified(at: String)
+    entity Rejected(reason: String, at: String)
+    entity ProposalRejected(reason: String, at: String)
+    entity Stale(reason: String, since: String)
+  end
+
+  -- =================================================================
+  -- Agent capabilities
+  -- =================================================================
+
+  enum Capability
+    entity Code(languages: List[T = String])
+    entity Test
+    entity Refine
+    entity Review
+    entity Decompose
+    entity Architect
+    entity HumanJudgment
+  end
+
+  -- =================================================================
+  -- Feedback
+  -- =================================================================
+
+  entity Feedback(
+    workitem : String,
+    author   : String,
+    content  : Term,
+    at       : String
+  )
+
+end

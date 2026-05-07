@@ -1,0 +1,100 @@
+-- Work items
+
+fact WorkItem(
+  id: "WI-001",
+  description: "Add in-engine datum index in Engine: Map[DataHash, Data] populated from datum-on-output and datum witnesses during applyBlock; pruned with the rollback buffer; consulted by BaseStreamProvider.getDatum before falling through to backup. Motivation: BlockchainReaderTF.getDatum was added upstream and we currently always fall through to engine.backup, returning None when no backup is configured even for datums we just witnessed in-window.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-05T16:31:07Z"))
+
+fact WorkItem(
+  id: "WI-002",
+  description: "Persistent datum dictionary on RocksDbChainStore: new column-family keyed by DataHash, populated when blocks are committed to the chainstore; consulted by BaseStreamProvider.getDatum after the in-engine index miss and before backup fall-through. Motivation: covers datums that aged out of the rollback window or were witnessed before the subscriber joined; closes the historical-query gap for nodes without a Blockfrost-style backup.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-001"],
+  status: Verified(at: "2026-05-06T17:11:55Z"))
+
+fact WorkItem(
+  id: "WI-003",
+  description: "Scala-only Mithril verification path: implement certificate-chain + Cardano-database snapshot verification natively in Scala/Java (MuSig2 over BLS12-381, MMR/Merkle proofs already exist in repo) so SnapshotSource.Mithril can verify without going through the wasm-bindgen mithril-client WASM blob. Motivation: the WASM path runs the entire mithril-stm verification inside Chicory at ~20-100x interpreted-Rust overhead; observed hours-long verification of a 1.4 KB cert-metadata fetch tracing back to setTimeout/BYOB-stream stub interactions, and the call profiler shows MuSig2 verify dominating CPU. A native path eliminates the WASM runtime entirely for verification, leaves the WASM module only for orchestration/aggregator API calls (which can also be ported), and unblocks running verification on platforms where Chicory or wasm-bindgen-futures behaviour is fragile. Scheduling note (2026-05-06): deferred until after the M11 transaction-submission work (WI-011); not a dependency, just a priority preference.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Open)
+
+fact WorkItem(
+  id: "WI-004",
+  description: "Make MithrilVerificationProbe aggregator URL + genesis verification key configurable via env vars (SCALUS_MITHRIL_AGGREGATOR / SCALUS_MITHRIL_GENESIS_KEY) so the existing probe can be pointed at mainnet without code edits. Preserve the testing-preview defaults. Motivation: today the URL and genesis key are hardcoded for testing-preview; mainnet probing requires editing source. Trivial mechanical change unblocking WI-006.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-06T12:24:04Z"))
+
+fact WorkItem(
+  id: "WI-005",
+  description: "RocksDB-backed restore probe: replace the InMemoryKvStore in ImmutableDbRestoreProbe / SnapshotDirRestorer probes with RocksDbChainStore so a full restore can run on a developer machine without ~15 GB of heap. The mainnet UTxO set won't fit in heap at all; this is a hard prerequisite for any mainnet probing. Should reuse the existing RocksDbChainStore + ChainStoreUtxoSet path. Motivation: ImmutableDbRestoreProbe doc already warns ~15 GB RSS at preview scale; mainnet is ~10x larger.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-06T12:24:04Z"))
+
+fact WorkItem(
+  id: "WI-006",
+  description: "Mainnet snapshot end-to-end probe: download + verify (cert chain + Cardano-DB Merkle) + restore the latest mainnet Mithril snapshot via RocksDbChainStore. Capture: TxOut tag distribution + first decode failure (if any), total wall time per phase, RSS peak, full restored UTxO count vs aggregator-reported. Becomes the authoritative 'mainnet works' signal. Motivation: today all probes target testing-preview; mainnet has been on Conway for many epochs and exercises variants the synthetic tests don't (multi-asset combos, native-script ref-scripts at scale). Depends on WI-004 (configurable aggregator) and WI-005 (RocksDB-backed restore).",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-004", "WI-005"],
+  status: Verified(at: "2026-05-06T17:11:55Z"))
+
+fact WorkItem(
+  id: "WI-007",
+  description: "Upstream scalus-cardano-ledger: add Script.PlutusV4(ByteString) case + matching CBOR codec + PlutusScriptEvaluator stub/reject path. Drives Dijkstra-era support across the ecosystem; without it our MemPackReaders.readPlutusScript tag 3 must continue to throw UnsupportedTxOutVariant, blocking restore of any post-Dijkstra-fork snapshot. Motivation: Dijkstra hasn't hard-forked on a public chain as of 2026-05; preview will see it first. One-line follow-up here (case 3 => Script.PlutusV4(bs)) lands once upstream merges. File issue/PR on scalus3/scalus.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-06T11:16:11Z"))
+
+fact WorkItem(
+  id: "WI-008",
+  description: "MemPackReaders tag-3 PlutusScript: switch from UnsupportedTxOutVariant rejection to Script.PlutusV4(bs) construction once upstream Scalus exposes the case (see WI-007). One-line in readPlutusScript + flip MemPackSuite 'PlutusV4 (Dijkstra, tag 3) is unsupported' test from rejection to positive assertion. Motivation: unblocks restore of post-Dijkstra-fork snapshots.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-007"],
+  status: Verified(at: "2026-05-06T17:11:55Z"))
+
+fact WorkItem(
+  id: "WI-009",
+  description: "M11.P1 — Unix-socket transport + N2C handshake. New module scalus-cardano-network/jvm/.../n2c with NodeToClientClient, NodeToClientConnection, N2cHandshakeVersions. Reuses M4 multiplexer/SDU framing; adds JDK 16+ UnixDomainSocketAddress binding and the N2C version-data codec (NetworkMagic + query flag, minimum NodeToClientVersion.V16). Tests: handshake state-machine round-trip + yaci-devkit testcontainer connect. See docs/local/design/n2c-protocol-m11.md. Delivered: parallel n2c.handshake package mirrors the N2N driver/codec; JvmUnixDomainAsyncByteChannel wraps a blocking SocketChannel (AsynchronousSocketChannel still has no Unix support); MiniProtocolId enum gained LocalChainSync/LocalTxSubmission/LocalStateQuery/LocalTxMonitor; yaci IT deferred to P2 since the testcontainer doesn't expose UDS (P1 ships unit + UDS-loopback IT instead).",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-06T15:11:15Z"))
+
+fact WorkItem(
+  id: "WI-010",
+  description: "M11.P2 — N2C ChainSync wired into the engine. Reuse ChainSyncDriver over the N2C MiniProtocolBytes handle; add BlockNodeToClient decoder (reuses existing HfcDiskBlockDecoder from scalus-chain-store-mithril). Replace the UnsupportedSourceException stubs in Fs2BlockchainStreamProvider:64 and OxBlockchainStreamProvider:73 with the real builder. Integration test mirrors YaciN2nChainSyncSuite end-to-end (observe blocks + rollbacks). Depends on WI-009 (M11.P1).",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-009"],
+  status: Verified(at: "2026-05-06T17:11:56Z"))
+
+fact WorkItem(
+  id: "WI-011",
+  description: "M11.P3 — LocalTxSubmission driver + BackupSource.LocalNode. Implements the LocalTxSubmission state machine (Idle/Busy/Done) over the N2C mux; SubmitError gains RejectReason.Cbor(bytes, era) for raw rejection bytes (typed decomposition deferred). New BackupSource.LocalNode(socketPath, network) variant; engine submit goes via the local node when this backup is configured. Connection-share with ChainSyncSource.N2C when both point at the same socket. Tests: state-machine unit + yaci submit-and-confirm integration. Depends on WI-009 (M11.P1).",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-009"],
+  status: Verified(at: "2026-05-06T17:11:56Z"))
+
+fact WorkItem(
+  id: "WI-012",
+  description: "M11.P4 — N2C documentation + diagnostics. README updates for the new deployment surface; provider-level diagnostic handle exposing n2cConnectedSince, lastSubmittedHash etc. via the existing BackupSource introspection trait; migration note for users moving from BackupSource.Blockfrost to the all-N2C topology. Depends on WI-010 + WI-011 so the surface is real.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: ["WI-010", "WI-011"],
+  status: Delivered(agent: "claude", at: "2026-05-06T19:31:49Z"))
+
+fact WorkItem(
+  id: "WI-013",
+  description: "Reconcile milestone numbering across design docs. cardano-network-chainsync.md and cardano-network-transport.md still refer to N2C as M8 and LSQ as M12; indexer-node.md (the authoritative public list) has N2C=M11 and LSQ=M12. Sweep both transport/chainsync docs to use the indexer-node ordering. Mechanical, no code change. Trigger: do this when one of those docs is next being edited for substance, not as a standalone churn PR.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Open)
+
+fact WorkItem(
+  id: "WI-014",
+  description: "HOAS macro frontend for stream queries: lower a Scala lambda (e.g. utxo => utxo.address == addr && utxo.value.coin > Coin(X)) to the existing UtxoQuery ADT at compile time. Lives in scalus-node (this repo) alongside the streaming provider — macro reads the Tasty tree, recognises supported predicate shapes (Addr / Asset / TxOuts / Inputs equalities, AND/OR), emits a structured UtxoQuery plus a residual lambda for post-filter. Engine, ChainStore, persistence, LSQ, N2C are all unaffected: the runtime sees the same UtxoQuery values it sees today. Unsupported lambda shapes fail at compile time with a clear message. No deps on any other WI.",
+  acceptance: [ToolPasses("cargo-test")],
+  depends_on: [],
+  status: Verified(at: "2026-05-06T17:11:56Z"))
+
