@@ -11,7 +11,7 @@ import scalus.uplc.builtin.{ByteString, Data}
 import scalus.utils.Hex.toHex
 
 import java.nio.file.Path
-import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{ExecutionContext, Future}
 
 /** Submit-only `BlockchainProvider` over `LocalTxSubmission` against a local cardano-node.
@@ -41,19 +41,36 @@ final class LocalNodeProvider private (
     extends BlockchainProvider
     with BackupDiagnostics {
 
-    private val submitCount = new AtomicLong(0L)
-    private val rejectCount = new AtomicLong(0L)
-    private val lastSubmitted = new AtomicReference[Option[TransactionHash]](None)
+    // Single AtomicReference holds the snapshot; CAS-update on submit/reject so the
+    // BackupDiagnostics contract's "coherent point-in-time view" is real, not approximate.
+    private val diagState = new AtomicReference[BackupDiagnosticsSnapshot](
+      BackupDiagnosticsSnapshot(
+        connectedSinceMillis = connectedSinceMillis,
+        lastSubmittedHash = None,
+        submitCount = 0L,
+        rejectCount = 0L
+      )
+    )
+
+    private def updateDiag(f: BackupDiagnosticsSnapshot => BackupDiagnosticsSnapshot): Unit = {
+        @scala.annotation.tailrec
+        def loop(): Unit = {
+            val cur = diagState.get
+            val next = f(cur)
+            if !diagState.compareAndSet(cur, next) then loop()
+        }
+        loop()
+    }
 
     def submit(transaction: Transaction): Future[Either[SubmitError, TransactionHash]] = {
         val txBytes = ByteString.fromArray(Cbor.encode(transaction).toByteArray)
-        submitCount.incrementAndGet()
+        updateDiag(s => s.copy(submitCount = s.submitCount + 1L))
         driver.submit(submitEra, txBytes).map {
             case Right(_) =>
-                lastSubmitted.set(Some(transaction.id))
+                updateDiag(s => s.copy(lastSubmittedHash = Some(transaction.id)))
                 Right(transaction.id)
             case Left(LocalTxSubmissionRejection(rejectEra, reasonBytes)) =>
-                rejectCount.incrementAndGet()
+                updateDiag(s => s.copy(rejectCount = s.rejectCount + 1L))
                 Left(
                   NodeSubmitError.ValidationError(
                     message =
@@ -64,12 +81,7 @@ final class LocalNodeProvider private (
         }
     }
 
-    def diagnostics: BackupDiagnosticsSnapshot = BackupDiagnosticsSnapshot(
-      connectedSinceMillis = connectedSinceMillis,
-      lastSubmittedHash = lastSubmitted.get,
-      submitCount = submitCount.get,
-      rejectCount = rejectCount.get
-    )
+    def diagnostics: BackupDiagnosticsSnapshot = diagState.get
 
     /** Tear down the driver + connection. Idempotent. */
     def close(): Future[Unit] = driver.close().flatMap(_ => conn.close())

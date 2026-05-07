@@ -32,8 +32,10 @@ trait BackupDiagnostics {
   * @param submitCount
   *   total submit attempts since the backup connected — both successful and rejected.
   * @param rejectCount
-  *   subset of [[submitCount]] that surfaced a typed rejection from the node. Network/transport
-  *   failures are not counted here; they propagate as future failures, not `Left(SubmitError)`.
+  *   subset of [[submitCount]] that surfaced a node-level rejection (e.g. `MsgRejectTx` for a
+  *   LocalTxSubmission backup, `NodeSubmitError` family for HTTPS backups). Network/transport
+  *   failures (`NetworkSubmitError.ConnectionError`, `RateLimited`, peer EOF, etc.) are not counted
+  *   here even when surfaced as `Left(SubmitError)` — they're operational rather than ledger-level.
   */
 final case class BackupDiagnosticsSnapshot(
     connectedSinceMillis: Long,
