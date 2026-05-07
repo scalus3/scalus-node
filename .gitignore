@@ -19,3 +19,7 @@ metals.sbt
 
 # Local-only design notes / scratch — versioned design docs live under docs/internal/.
 docs/local/
+
+# Local-only work-item tracking — anthill-todo state (claim trail, delivered/verified
+# timestamps) is per-developer scratch, not shared bookkeeping.
+anthill-todo/
