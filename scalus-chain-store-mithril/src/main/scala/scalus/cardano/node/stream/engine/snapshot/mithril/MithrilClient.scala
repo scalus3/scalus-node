@@ -71,10 +71,10 @@ final class MithrilClient private (
       * leaf certificate. A failed walk surfaces as a Future failure carrying the WASM error string;
       * no certificate is returned in that case.
       *
-      * The returned certificate's `signedMessage` is a SHA-256 of its `protocolMessage.messageParts`
-      * computed via [[ProtocolMessageHash]] — re-deriving it locally with our own merkle root in
-      * place of the aggregator's is what proves snapshot authenticity (see
-      * [[CardanoDatabaseVerifier]]).
+      * The returned certificate's `signedMessage` is a SHA-256 of its
+      * `protocolMessage.messageParts` computed via [[ProtocolMessageHash]] — re-deriving it locally
+      * with our own merkle root in place of the aggregator's is what proves snapshot authenticity
+      * (see [[CardanoDatabaseVerifier]]).
       */
     def verifyCertificateChain(hash: String): Future[MithrilCertificateMessage] =
         withHashArg("mithrilclient_verify_certificate_chain", hash)
@@ -431,10 +431,10 @@ object MithrilClient {
     /** Construct a client around a fresh WASM instance wired to `aggregatorUrl`. Caller owns the
       * returned client and must [[MithrilClient.close]] it when done.
       *
-      * `onFetch` observes every WASM-initiated HTTP request — issued when the request is
-      * dispatched and again when the response settles. The chain-walk inside
-      * [[verifyCertificateChain]] is otherwise opaque (one fetch per cert, hundreds of hops on
-      * preview); install a listener to surface progress.
+      * `onFetch` observes every WASM-initiated HTTP request — issued when the request is dispatched
+      * and again when the response settles. The chain-walk inside [[verifyCertificateChain]] is
+      * otherwise opaque (one fetch per cert, hundreds of hops on preview); install a listener to
+      * surface progress.
       */
     def create(
         aggregatorUrl: String,

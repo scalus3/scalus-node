@@ -2,17 +2,27 @@ package scalus.cardano.node.stream.engine.snapshot
 
 import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.node.stream.engine.KvChainStore
-import scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore
 
 import java.nio.file.{Files, Path}
 
-/** Manual end-to-end probe: runs [[SnapshotDirRestorer]] against a real mithril-downloaded
-  * preview snapshot. Gated on `SCALUS_SNAPSHOT_DIR_PROBE=1` and `SCALUS_MITHRIL_DEST=<dir>` (or
-  * the `/tmp/mithrill-preview` fallback).
+/** Manual end-to-end probe: runs [[SnapshotDirRestorer]] against a real mithril-downloaded preview
+  * snapshot. Gated on `SCALUS_SNAPSHOT_DIR_PROBE=1` and `SCALUS_MITHRIL_DEST=<dir>` (or the
+  * `/tmp/mithrill-preview` fallback).
+  *
+  * Defaults to a heap-resident `InMemoryKvStore`. Set
+  * [[ProbeKvStore.RocksDbDirEnv `SCALUS_RESTORE_ROCKSDB_DIR=<path>`]] to back the store with
+  * RocksDB at `<path>` instead — required for mainnet-scale runs where the UTxO set won't fit in
+  * heap.
   *
   * {{{
   *   SCALUS_SNAPSHOT_DIR_PROBE=1 \
   *   SCALUS_MITHRIL_DEST=/tmp/mithrill-preview \
+  *     sbt 'scalusChainStoreMithril/testOnly *SnapshotDirRealFixtureProbe'
+  *
+  *   # Or, RocksDB-backed:
+  *   SCALUS_SNAPSHOT_DIR_PROBE=1 \
+  *   SCALUS_MITHRIL_DEST=/tmp/mithrill-preview \
+  *   SCALUS_RESTORE_ROCKSDB_DIR=/tmp/scalus-restore-rocksdb \
   *     sbt 'scalusChainStoreMithril/testOnly *SnapshotDirRealFixtureProbe'
   * }}}
   */
@@ -31,7 +41,9 @@ final class SnapshotDirRealFixtureProbe extends AnyFunSuite {
           s"expected immutable/ and ledger/ under $root"
         )
 
-        val store = new KvChainStore(InMemoryKvStore())
+        val opened = ProbeKvStore.open()
+        info(s"backend: ${opened.label}")
+        val store = new KvChainStore(opened.store)
         try {
             val blockProgress = new java.util.concurrent.atomic.AtomicLong(0L)
             val utxoProgress = new java.util.concurrent.atomic.AtomicLong(0L)

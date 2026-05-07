@@ -90,7 +90,10 @@ class LocalTxSubmissionDriverSuite extends AnyFunSuite with ScalaFutures {
         val driver = newDriver(handle)
         handle.stage(MsgDone)
         val cause =
-            driver.submit(era = 6, ByteString.fromArray(Array[Byte](0xa0.toByte))).failed.futureValue
+            driver
+                .submit(era = 6, ByteString.fromArray(Array[Byte](0xa0.toByte)))
+                .failed
+                .futureValue
         assert(cause.isInstanceOf[IllegalStateException], s"got: $cause")
     }
 
@@ -102,7 +105,10 @@ class LocalTxSubmissionDriverSuite extends AnyFunSuite with ScalaFutures {
 
         driver.close().futureValue
         val cause =
-            driver.submit(era = 6, ByteString.fromArray(Array[Byte](0xa0.toByte))).failed.futureValue
+            driver
+                .submit(era = 6, ByteString.fromArray(Array[Byte](0xa0.toByte)))
+                .failed
+                .futureValue
         assert(cause.isInstanceOf[IllegalStateException], s"got: $cause")
         driver.close().futureValue
     }

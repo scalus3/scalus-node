@@ -1,11 +1,9 @@
 package scalus.cardano.node.stream.engine
 
 import org.scalatest.funsuite.AnyFunSuite
-import scalus.cardano.ledger.{CardanoInfo, DataHash}
+import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.node.stream.{ChainPoint, ChainTip, UtxoEvent}
 import scalus.cardano.node.{UtxoQuery, UtxoSource}
-import scalus.uplc.builtin.Data
-import scalus.uplc.builtin.Data.dataHash
 
 import scala.concurrent.duration.*
 import scala.concurrent.Await
@@ -158,8 +156,7 @@ class EngineSuite extends AnyFunSuite {
 
     test("lookupDatum surfaces an in-window datum and forgets it after rollback") {
         val engine = mkEngine()
-        val d: Data = Data.I(BigInt(123))
-        val h = DataHash.fromByteString(d.dataHash)
+        val (h, d) = datum(123)
 
         val blockWithDatum = block(1, tx(100)).copy(datums = Map(h -> d))
         Await.result(engine.onRollForward(blockWithDatum), timeout)
@@ -171,13 +168,27 @@ class EngineSuite extends AnyFunSuite {
 
     test("lookupDatum drops datums whose introducing block ages past the security horizon") {
         val engine = mkEngine(securityParam = 1)
-        val d: Data = Data.I(BigInt(7))
-        val h = DataHash.fromByteString(d.dataHash)
+        val (h, d) = datum(7)
 
         Await.result(engine.onRollForward(block(1, tx(11)).copy(datums = Map(h -> d))), timeout)
         assert(Await.result(engine.lookupDatum(h), timeout).contains(d))
 
         Await.result(engine.onRollForward(block(2, tx(12))), timeout)
         assert(Await.result(engine.lookupDatum(h), timeout).isEmpty)
+    }
+
+    test("lookupDatum falls through to ChainStoreDatumDict once the in-memory window evicts") {
+        val store = new KvChainStore(
+          scalus.cardano.node.stream.engine.kvstore.InMemoryKvStore()
+        )
+        val engine =
+            new Engine(ci, None, securityParam = 1, chainStore = Some(store))
+        val (h, d) = datum(99)
+
+        Await.result(engine.onRollForward(block(1, tx(11)).copy(datums = Map(h -> d))), timeout)
+        // Push past the k=1 horizon so the volatile DatumIndex evicts the entry; the persistent
+        // dict on the configured ChainStore still answers.
+        Await.result(engine.onRollForward(block(2, tx(12))), timeout)
+        assert(Await.result(engine.lookupDatum(h), timeout).contains(d))
     }
 }

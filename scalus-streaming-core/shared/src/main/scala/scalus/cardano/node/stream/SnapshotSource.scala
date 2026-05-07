@@ -29,8 +29,8 @@ object SnapshotSource {
 
     /** Mithril aggregator source. Resolved at provider-construction time by an SPI implementation
       * loaded from the classpath (see [[engine.snapshot.MithrilSnapshotResolver]] — `META-INF`
-      * service registration in `scalus-chain-store-mithril`). When the SPI is not on the
-      * classpath, raises [[UnsupportedSourceException]].
+      * service registration in `scalus-chain-store-mithril`). When the SPI is not on the classpath,
+      * raises [[UnsupportedSourceException]].
       *
       * @param aggregatorUrl
       *   Mithril aggregator endpoint, e.g.
@@ -39,13 +39,13 @@ object SnapshotSource {
       *   hex-encoded genesis verification key for the target network.
       * @param workDir
       *   stable on-disk location for the downloaded V2 artefact. Must be a directory the resolver
-      *   can write to; resumable across restarts via the `.extracted` markers the downloader
-      *   leaves behind. Required (no default) because the artefact is multi-GB and a tmp-dir
-      *   default would silently re-download on every start.
+      *   can write to; resumable across restarts via the `.extracted` markers the downloader leaves
+      *   behind. Required (no default) because the artefact is multi-GB and a tmp-dir default would
+      *   silently re-download on every start.
       * @param immutableFileRange
-      *   `Some((from, to))` (inclusive 1-based) restricts which immutable chunks the resolver pulls;
-      *   `None` means "all chunks the aggregator advertises". Useful when the CDN retains only a
-      *   rolling window (e.g. testing-preview keeps ~15K most-recent chunks).
+      *   `Some((from, to))` (inclusive 1-based) restricts which immutable chunks the resolver
+      *   pulls; `None` means "all chunks the aggregator advertises". Useful when the CDN retains
+      *   only a rolling window (e.g. testing-preview keeps ~15K most-recent chunks).
       * @param snapshotHash
       *   pin a specific signed snapshot by hash; `None` picks the aggregator's latest.
       * @param verification

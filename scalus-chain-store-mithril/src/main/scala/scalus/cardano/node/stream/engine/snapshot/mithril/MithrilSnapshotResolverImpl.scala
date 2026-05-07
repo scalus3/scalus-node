@@ -3,18 +3,9 @@ package scalus.cardano.node.stream.engine.snapshot.mithril
 import cps.*
 import cps.monads.FutureAsyncMonad
 import scalus.cardano.node.stream.engine.snapshot.immutabledb.DigestsVerifier
-import scalus.cardano.node.stream.engine.snapshot.{
-    MithrilSnapshotResolver,
-    SnapshotDirRestorer,
-    SnapshotError
-}
+import scalus.cardano.node.stream.engine.snapshot.{MithrilSnapshotResolver, SnapshotDirRestorer, SnapshotError}
 import scalus.cardano.node.stream.engine.{ChainStore, ChainStoreUtxoSet}
-import scalus.cardano.node.stream.{
-    ChainTip,
-    MithrilVerificationMode,
-    SnapshotSource,
-    UnsupportedSourceException
-}
+import scalus.cardano.node.stream.{ChainTip, MithrilVerificationMode, SnapshotSource, UnsupportedSourceException}
 
 import java.nio.file.Files
 import scala.concurrent.{ExecutionContext, Future}
@@ -36,17 +27,17 @@ import scala.util.{Success, Try}
   * [[scalus.cardano.node.stream.SnapshotSource.Mithril.verification]]:
   *
   *   - [[MithrilVerificationMode.Wasm]] (default) — full cryptographic chain:
-  *       1. WASM `verify_certificate_chain(certHash)` — walks the Mithril cert chain back to the
-  *          genesis verification key. Runs concurrently with the artefact download.
-  *       2. [[DigestsVerifier]] file-level SHA-256 cross-check against the digests manifest.
-  *          Inline-computed digests skip a full re-read of every immutable file.
-  *       3. [[CardanoDatabaseVerifier]] recomputes the Cardano-Database Merkle root and anchors
-  *          it in the verified cert's `signed_message`. Mismatch ⇒ restore fails.
+  *     1. WASM `verify_certificate_chain(certHash)` — walks the Mithril cert chain back to the
+  *        genesis verification key. Runs concurrently with the artefact download.
+  *     2. [[DigestsVerifier]] file-level SHA-256 cross-check against the digests manifest.
+  *        Inline-computed digests skip a full re-read of every immutable file.
+  *     3. [[CardanoDatabaseVerifier]] recomputes the Cardano-Database Merkle root and anchors it in
+  *        the verified cert's `signed_message`. Mismatch ⇒ restore fails.
   *   - [[MithrilVerificationMode.SkipVerification]] — runs only step 2 (file-level digests).
-  *     Catches corruption / truncation but does NOT prove the manifest is signed. Not a
-  *     security claim; intended for trusted internal mirrors / CI fixtures / dev iteration.
-  *   - [[MithrilVerificationMode.ScalaOnly]] — pending M10e cross-platform native verifier.
-  *     Throws [[UnsupportedSourceException]] today.
+  *     Catches corruption / truncation but does NOT prove the manifest is signed. Not a security
+  *     claim; intended for trusted internal mirrors / CI fixtures / dev iteration.
+  *   - [[MithrilVerificationMode.ScalaOnly]] — pending M10e cross-platform native verifier. Throws
+  *     [[UnsupportedSourceException]] today.
   */
 final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
 
@@ -155,10 +146,10 @@ final class MithrilSnapshotResolverImpl extends MithrilSnapshotResolver {
         )
     }
 
-    /** Wait for both `fa` and `fb` to settle (success or failure) and surface the outcomes as
-      * a `(Try[A], Try[B])`. Unlike `Future.zip`, a failure in `fa` does not short-circuit
-      * before `fb` finishes — a precondition for safely running cleanup that releases
-      * resources both futures depend on.
+    /** Wait for both `fa` and `fb` to settle (success or failure) and surface the outcomes as a
+      * `(Try[A], Try[B])`. Unlike `Future.zip`, a failure in `fa` does not short-circuit before
+      * `fb` finishes — a precondition for safely running cleanup that releases resources both
+      * futures depend on.
       */
     private def settledZip[A, B](fa: Future[A], fb: Future[B])(using
         ExecutionContext

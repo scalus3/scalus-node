@@ -1,6 +1,6 @@
 package scalus.cardano.node.stream.engine.snapshot.ledgerstate
 
-import com.github.plokhotnyuk.jsoniter_scala.core.{JsonValueCodec, readFromArray}
+import com.github.plokhotnyuk.jsoniter_scala.core.{readFromArray, JsonValueCodec}
 import com.github.plokhotnyuk.jsoniter_scala.macros.{CodecMakerConfig, JsonCodecMaker}
 import scalus.cardano.node.stream.ChainTip
 import scalus.cardano.node.stream.engine.{ChainStore, ChainStoreUtxoSet}
@@ -16,23 +16,23 @@ import java.nio.file.{Files, Path}
   *      [[UnsupportedLedgerSnapshotFormat]] on a legacy or LSM layout.
   *   2. Verify the `meta` file's `backend` is `"utxohd-mem"` — guards against an InMemory-shaped
   *      dir whose metadata says otherwise (corrupt download, version mismatch).
-  *   3. Cross-check the caller-supplied tip's slot against the directory name (cardano-node
-  *      always names the directory by the snapshot slot).
-  *   4. Open `tables/tvar`, stream `(TxIn, TxOut)` pairs through [[TvarTableDecoder]], and
-  *      forward them to `store.restoreUtxoSet(tip, iter)`.
+  *   3. Cross-check the caller-supplied tip's slot against the directory name (cardano-node always
+  *      names the directory by the snapshot slot).
+  *   4. Open `tables/tvar`, stream `(TxIn, TxOut)` pairs through [[TvarTableDecoder]], and forward
+  *      them to `store.restoreUtxoSet(tip, iter)`.
   *
-  * The caller supplies the tip (slot + block hash + block number) because extracting it from
-  * the `state` file would require decoding the outer `ExtLedgerState` CBOR — a big detour for
+  * The caller supplies the tip (slot + block hash + block number) because extracting it from the
+  * `state` file would require decoding the outer `ExtLedgerState` CBOR — a big detour for
   * information the caller already has from the paired `ImmutableDbRestorer` pass. The restorer
-  * still verifies the slot against the on-disk directory name so a mistyped tip doesn't
-  * silently produce a bad store.
+  * still verifies the slot against the on-disk directory name so a mistyped tip doesn't silently
+  * produce a bad store.
   *
   * ==Not idempotent across partial runs==
   *
-  * `ChainStoreUtxoSet.restoreUtxoSet` is not required to be atomic (the trait docs call out
-  * that mainnet-sized UTxO sets span many write batches). A crash mid-restore leaves the store
-  * in a partially-populated state; callers should treat that as "wipe and retry" — on the next
-  * cold start the tip is absent, which triggers a fresh bootstrap.
+  * `ChainStoreUtxoSet.restoreUtxoSet` is not required to be atomic (the trait docs call out that
+  * mainnet-sized UTxO sets span many write batches). A crash mid-restore leaves the store in a
+  * partially-populated state; callers should treat that as "wipe and retry" — on the next cold
+  * start the tip is absent, which triggers a fresh bootstrap.
   */
 final class LedgerStateRestorer(store: ChainStore & ChainStoreUtxoSet) {
 
@@ -77,9 +77,14 @@ final class LedgerStateRestorer(store: ChainStore & ChainStoreUtxoSet) {
           new BufferedInputStream(new FileInputStream(tablesPath.toFile), 128 * 1024)
         )
         try {
-            val instrumented = new Iterator[(scalus.cardano.ledger.TransactionInput, scalus.cardano.ledger.TransactionOutput)] {
+            val instrumented = new Iterator[
+              (scalus.cardano.ledger.TransactionInput, scalus.cardano.ledger.TransactionOutput)
+            ] {
                 override def hasNext: Boolean = handle.iterator.hasNext
-                override def next(): (scalus.cardano.ledger.TransactionInput, scalus.cardano.ledger.TransactionOutput) = {
+                override def next(): (
+                    scalus.cardano.ledger.TransactionInput,
+                    scalus.cardano.ledger.TransactionOutput
+                ) = {
                     val kv = handle.iterator.next()
                     applied += 1
                     if (applied & 0xfff) == 0 then
@@ -100,9 +105,9 @@ final class LedgerStateRestorer(store: ChainStore & ChainStoreUtxoSet) {
         )
     }
 
-    /** The `meta` file is JSON: `{"backend": "utxohd-mem"|"utxohd-lmdb"|"utxohd-lsm",
-      * "checksum": <u64>, "tablesCodecVersion": 1}`. Only `backend` matters to us — the
-      * checksum is verified upstream by Mithril's digest manifest.
+    /** The `meta` file is JSON: `{"backend": "utxohd-mem"|"utxohd-lmdb"|"utxohd-lsm", "checksum":
+      * <u64>, "tablesCodecVersion": 1}`. Only `backend` matters to us — the checksum is verified
+      * upstream by Mithril's digest manifest.
       */
     private def verifyMetaBackend(metaFile: Path): Unit = {
         val bytes =
@@ -146,8 +151,8 @@ object LedgerStateRestorer {
       */
     final class RestoreError(msg: String) extends RuntimeException(msg)
 
-    /** Shape of the cardano-node-written `meta` file inside a UTxO-HD V2 InMemory snapshot.
-      * Mirrors `ouroboros-consensus/.../LedgerDB/Snapshots.hs` `SnapshotMetadata`'s ToJSON.
+    /** Shape of the cardano-node-written `meta` file inside a UTxO-HD V2 InMemory snapshot. Mirrors
+      * `ouroboros-consensus/.../LedgerDB/Snapshots.hs` `SnapshotMetadata`'s ToJSON.
       */
     private final case class MetaFile(
         backend: String,

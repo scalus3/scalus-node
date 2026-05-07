@@ -9,6 +9,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Network
 import scalus.cardano.ledger.{
     CardanoInfo,
+    DataHash,
     ProtocolParams,
     SlotNo,
     Transaction,
@@ -17,6 +18,7 @@ import scalus.cardano.ledger.{
     TransactionOutput,
     Value
 }
+import scalus.uplc.builtin.Data
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
 import scalus.cardano.node.stream.{
@@ -100,6 +102,7 @@ class YaciN2nBackupSeedSuite
                 Future.successful(
                   Left(NetworkSubmitError.ConnectionError("submit not supported in seed-IT stub"))
                 )
+            def getDatum(datumHash: DataHash): Future[Option[Data]] = Future.successful(None)
         }
 
         val config = StreamProviderConfig(

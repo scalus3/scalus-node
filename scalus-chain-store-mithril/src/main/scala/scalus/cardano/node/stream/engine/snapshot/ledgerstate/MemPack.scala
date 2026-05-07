@@ -15,8 +15,8 @@ package scalus.cardano.node.stream.engine.snapshot.ledgerstate
   *
   * ==VarLen==
   *
-  * `VarLen Word` is a big-endian base-128 encoding: the first byte holds the most-significant
-  * 7-bit group with the continuation bit (0x80) set; subsequent bytes hold lower groups with the
+  * `VarLen Word` is a big-endian base-128 encoding: the first byte holds the most-significant 7-bit
+  * group with the continuation bit (0x80) set; subsequent bytes hold lower groups with the
   * continuation bit until a final byte with the continuation bit clear. `Length` wraps `VarLen
   * Word` but rejects values with the high bit of the underlying `Word` set (would be negative
   * `Int`).
@@ -25,8 +25,8 @@ package scalus.cardano.node.stream.engine.snapshot.ledgerstate
   *
   * A [[MemPack.Reader]] holds a cursor into an `Array[Byte]` and consumes bytes left-to-right.
   * Higher-level decoders (TxIn, CompactAddr, CompactValue, TxOut, …) compose the primitives
-  * declared here. Every `read*` method throws [[MemPack.DecodeError]] on end-of-buffer or
-  * invariant violation.
+  * declared here. Every `read*` method throws [[MemPack.DecodeError]] on end-of-buffer or invariant
+  * violation.
   */
 object MemPack {
 
@@ -96,9 +96,9 @@ object MemPack {
         }
 
         /** Little-endian Word64, returned as raw `Long` bits. Callers interpreting this as an
-          * unsigned 64-bit number should be aware that values ≥ 2^63 will appear negative.
-          * Cardano uses Word64 for lovelace (≤ 45 B ADA = 4.5e16, well below 2^63), so signedness
-          * is practically a non-issue.
+          * unsigned 64-bit number should be aware that values ≥ 2^63 will appear negative. Cardano
+          * uses Word64 for lovelace (≤ 45 B ADA = 4.5e16, well below 2^63), so signedness is
+          * practically a non-issue.
           */
         def readWord64(): Long = {
             val at = advance(8)
@@ -127,9 +127,9 @@ object MemPack {
           * size-prefixes in MemPack.
           *
           * On 64-bit platforms `VarLen Word` is `VarLen Word64`; each byte contributes 7 bits,
-          * continuation bit is 0x80, most-significant group first. Up to 10 bytes for a full
-          * Word64 (10 * 7 = 70 ≥ 64). The top mask check mirrors `unpack7BitVarLenLast`'s
-          * `0b_1111_1110` for Word64.
+          * continuation bit is 0x80, most-significant group first. Up to 10 bytes for a full Word64
+          * (10 * 7 = 70 ≥ 64). The top mask check mirrors `unpack7BitVarLenLast`'s `0b_1111_1110`
+          * for Word64.
           */
         def readVarLenWord(): Long = {
             var acc: Long = 0L
@@ -155,8 +155,8 @@ object MemPack {
             acc
         }
 
-        /** `Length` = `VarLen Word` with a rejection for values whose high bit is set (the
-          * Haskell side converts Word to Int and errors on negatives).
+        /** `Length` = `VarLen Word` with a rejection for values whose high bit is set (the Haskell
+          * side converts Word to Int and errors on negatives).
           */
         def readLength(): Int = {
             val w = readVarLenWord()
@@ -165,8 +165,8 @@ object MemPack {
             w.toInt
         }
 
-        /** A `ByteString` / `ShortByteString` / `ByteArray` is written as `Length` followed by
-          * that many raw bytes.
+        /** A `ByteString` / `ShortByteString` / `ByteArray` is written as `Length` followed by that
+          * many raw bytes.
           */
         def readLengthPrefixedBytes(): Array[Byte] = {
             val n = readLength()
@@ -212,15 +212,15 @@ object MemPack {
     }
 
     /** Raise an `unknownTagM`-shaped error — matches the Haskell error message for parity with
-      * round-trip fixtures that assert on it. `pos` points at the byte AFTER the tag byte (so
-      * the failing tag is at `pos - 1`); passing a [[Reader]] is encouraged over the
-      * typeName-only overload so the error carries location info.
+      * round-trip fixtures that assert on it. `pos` points at the byte AFTER the tag byte (so the
+      * failing tag is at `pos - 1`); passing a [[Reader]] is encouraged over the typeName-only
+      * overload so the error carries location info.
       */
     def unknownTag(typeName: String, tag: Int, r: Reader): Nothing =
         throw new DecodeError(s"Unrecognized Tag: $tag while decoding $typeName", r.offset)
 
-    /** Raise an `unknownTagM`-shaped error without a reader context. Use only from call sites
-      * that genuinely don't hold a `Reader` (should be rare); prefer the 3-arg overload.
+    /** Raise an `unknownTagM`-shaped error without a reader context. Use only from call sites that
+      * genuinely don't hold a `Reader` (should be rare); prefer the 3-arg overload.
       */
     def unknownTag(typeName: String, tag: Int): Nothing =
         throw new DecodeError(s"Unrecognized Tag: $tag while decoding $typeName")

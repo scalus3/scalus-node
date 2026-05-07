@@ -25,8 +25,8 @@ final class DatumIndex {
     /** Append the datums introduced by a block. Called from the engine's `onRollForward` after the
       * rollback buffer has accepted the block, so the index and the buffer stay in lockstep.
       *
-      * Empty `datums` is still recorded so subsequent `forgetBlock` / `applyBackward` calls find the
-      * block at the expected end of the deque.
+      * Empty `datums` is still recorded so subsequent `forgetBlock` / `applyBackward` calls find
+      * the block at the expected end of the deque.
       */
     def applyForward(point: ChainPoint, datums: Map[DataHash, Data]): Unit = {
         perBlock += (point -> datums.keySet)

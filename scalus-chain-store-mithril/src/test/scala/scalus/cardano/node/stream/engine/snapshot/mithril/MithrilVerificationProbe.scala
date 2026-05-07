@@ -11,24 +11,25 @@ import scala.concurrent.{Await, ExecutionContext}
 
 /** End-to-end cryptographic verification probe against a real Mithril aggregator.
   *
-  * Exercises the full chain — `MithrilClient.verifyCertificateChain` (cert-chain walk in WASM,
-  * back to the genesis verification key) → `DigestsVerifier.verify` (file-level SHA-256
-  * cross-check) → `CardanoDatabaseVerifier.verify` (Merkle root anchored against the cert's
-  * `signed_message`). A success here is the ground-truth confirmation that our [[MerkleMountainRange]]
-  * port matches `ckb-merkle-mountain-range`'s layout (any wrong bagging direction, leaf
-  * encoding, or part-key ordering would surface as `MerkleRootMismatch`).
+  * Exercises the full chain — `MithrilClient.verifyCertificateChain` (cert-chain walk in WASM, back
+  * to the genesis verification key) → `DigestsVerifier.verify` (file-level SHA-256 cross-check) →
+  * `CardanoDatabaseVerifier.verify` (Merkle root anchored against the cert's `signed_message`). A
+  * success here is the ground-truth confirmation that our [[MerkleMountainRange]] port matches
+  * `ckb-merkle-mountain-range`'s layout (any wrong bagging direction, leaf encoding, or part-key
+  * ordering would surface as `MerkleRootMismatch`).
   *
   * '''Manual.''' Tagged `[manual]` AND env-gated on `SCALUS_MITHRIL_VERIFY_PREVIEW=1` so `sbt test`
-  * / CI never invoke it. Reuses an already-downloaded snapshot at `SCALUS_MITHRIL_DEST` when one
-  * is present (resumable via the `.extracted` markers); otherwise downloads. Pin the snapshot
-  * with `SCALUS_MITHRIL_SNAPSHOT_HASH` to verify against a previously-downloaded artifact whose
-  * meta differs from the aggregator's current latest.
+  * / CI never invoke it. Reuses an already-downloaded snapshot at `SCALUS_MITHRIL_DEST` when one is
+  * present (resumable via the `.extracted` markers); otherwise downloads. Pin the snapshot with
+  * `SCALUS_MITHRIL_SNAPSHOT_HASH` to verify against a previously-downloaded artifact whose meta
+  * differs from the aggregator's current latest.
   *
-  * The probe defaults to the `testing-preview` aggregator. Override with `SCALUS_MITHRIL_AGGREGATOR`
-  * (full base URL ending in `/aggregator`) and `SCALUS_MITHRIL_GENESIS_KEY` (hex-encoded JSON
-  * byte array — the format Mithril publishes on its Releases page) to point the probe at preprod,
-  * mainnet, or any other aggregator. Both must be supplied together; falling back to
-  * preview defaults when only one is set would silently mix networks.
+  * The probe defaults to the `testing-preview` aggregator. Override with
+  * `SCALUS_MITHRIL_AGGREGATOR` (full base URL ending in `/aggregator`) and
+  * `SCALUS_MITHRIL_GENESIS_KEY` (hex-encoded JSON byte array — the format Mithril publishes on its
+  * Releases page) to point the probe at preprod, mainnet, or any other aggregator. Both must be
+  * supplied together; falling back to preview defaults when only one is set would silently mix
+  * networks.
   *
   * Invoke with:
   * {{{
@@ -64,9 +65,13 @@ final class MithrilVerificationProbe extends AnyFunSuite {
             case (Some(u), Some(k)) => (u, k)
             case (None, None)       => (DefaultPreviewAggregator, DefaultPreviewGenesisKey)
             case (Some(_), None) =>
-                fail("SCALUS_MITHRIL_AGGREGATOR set without SCALUS_MITHRIL_GENESIS_KEY — both required")
+                fail(
+                  "SCALUS_MITHRIL_AGGREGATOR set without SCALUS_MITHRIL_GENESIS_KEY — both required"
+                )
             case (None, Some(_)) =>
-                fail("SCALUS_MITHRIL_GENESIS_KEY set without SCALUS_MITHRIL_AGGREGATOR — both required")
+                fail(
+                  "SCALUS_MITHRIL_GENESIS_KEY set without SCALUS_MITHRIL_AGGREGATOR — both required"
+                )
         }
     }
 
@@ -103,8 +108,7 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                 val n = fetchCount.incrementAndGet()
                 if n % stride == 0L then println(f"[wasm-fetch] #$n%4d → $url")
             case MithrilAsyncRuntime.FetchEvent.Completed(_, url, status, _, ms) =>
-                if ms >= slowMs then
-                    println(f"[wasm-fetch] slow ${ms}%4d ms status=$status $url")
+                if ms >= slowMs then println(f"[wasm-fetch] slow ${ms}%4d ms status=$status $url")
             case MithrilAsyncRuntime.FetchEvent.Failed(_, url, err, ms) =>
                 println(f"[wasm-fetch] FAILED ${ms}%4d ms $url: $err")
         }
@@ -202,7 +206,10 @@ final class MithrilVerificationProbe extends AnyFunSuite {
                   s"missingOnDisk=${fileLevel.missingOnDisk.size} " +
                   s"unexpectedOnDisk=${fileLevel.unexpectedOnDisk.size}"
             )
-            assert(fileLevel.presentMatchesManifest, s"file-level mismatches: ${fileLevel.mismatches.take(3)}")
+            assert(
+              fileLevel.presentMatchesManifest,
+              s"file-level mismatches: ${fileLevel.mismatches.take(3)}"
+            )
 
             val tMerkle = System.nanoTime()
             CardanoDatabaseVerifier.verify(

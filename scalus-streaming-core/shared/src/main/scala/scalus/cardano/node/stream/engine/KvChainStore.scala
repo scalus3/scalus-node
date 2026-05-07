@@ -1,12 +1,12 @@
 package scalus.cardano.node.stream.engine
 
 import io.bullet.borer.{Cbor, Decoder, Encoder, Reader, Writer}
-import scalus.cardano.ledger.{BlockHash, TransactionHash, TransactionInput, TransactionOutput, Utxos}
+import scalus.cardano.ledger.{BlockHash, DataHash, TransactionHash, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.node.UtxoQuery
 import scalus.cardano.node.stream.{ChainPoint, ChainTip}
 import scalus.cardano.node.stream.engine.kvstore.KvStore
 import scalus.cardano.node.stream.engine.replay.ReplayError
-import scalus.uplc.builtin.ByteString
+import scalus.uplc.builtin.{ByteString, Data}
 
 import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.mutable
@@ -18,7 +18,10 @@ import scala.collection.mutable
   *
   * Thread safety: single-writer contract inherited from [[ChainStore]] — engine worker only.
   */
-final class KvChainStore(kv: KvStore) extends ChainStore with ChainStoreUtxoSet {
+final class KvChainStore(kv: KvStore)
+    extends ChainStore
+    with ChainStoreUtxoSet
+    with ChainStoreDatumDict {
 
     import KvChainStore.*
     import KvChainStore.given
@@ -86,6 +89,10 @@ final class KvChainStore(kv: KvStore) extends ChainStore with ChainStoreUtxoSet 
 
         val reverseDelta = ReverseDelta(addedBuffer.toVector, removedBuffer.toVector)
         writes += KvStore.Put(deltaKey(block.point), encodeCborBs(reverseDelta))
+
+        block.datums.foreach { (hash, data) =>
+            writes += KvStore.Put(datumKey(hash), encodeCborBs(data))
+        }
 
         kv.batch(writes.toSeq)
     }
@@ -236,6 +243,13 @@ final class KvChainStore(kv: KvStore) extends ChainStore with ChainStoreUtxoSet 
         if buf.nonEmpty then kv.batch(buf.toSeq)
     }
 
+    // ------------------------------------------------------------------
+    // ChainStoreDatumDict
+    // ------------------------------------------------------------------
+
+    def getDatumFromStore(hash: DataHash): Option[Data] =
+        kv.get(datumKey(hash)).map(bs => Cbor.decode(bs.bytes).to[Data].value)
+
     def tip: Option[ChainTip] = kv.get(tipKey).map(decodeTip)
 
     def close(): Unit = kv.close()
@@ -269,6 +283,7 @@ object KvChainStore {
     private val UtxoPrefix: Byte = 0x04
     private val UtxoByKeyPrefix: Byte = 0x05
     private val DeltaPrefix: Byte = 0x06
+    private val DatumPrefix: Byte = 0x07
 
     /** Cap on the number of [[KvStore.Write]] entries held in-heap at any moment during
       * [[KvChainStore.restoreUtxoSet]]. 1024 is a compromise: small enough that a mainnet restore
@@ -401,6 +416,17 @@ object KvChainStore {
         val buf = new Array[Byte](1 + 8)
         buf(0) = DeltaPrefix
         System.arraycopy(longToBE(slot), 0, buf, 1, 8)
+        ByteString.unsafeFromArray(buf)
+    }
+
+    /** Key for a persisted datum entry — `<DatumPrefix> <data-hash>`. The hash is fixed-width (32
+      * bytes) so a raw byte concat is unambiguous and no length prefix is needed.
+      */
+    private[engine] def datumKey(hash: DataHash): ByteString = {
+        val hashBytes = hash.bytes
+        val buf = new Array[Byte](1 + hashBytes.length)
+        buf(0) = DatumPrefix
+        System.arraycopy(hashBytes, 0, buf, 1, hashBytes.length)
         ByteString.unsafeFromArray(buf)
     }
 
@@ -555,6 +581,11 @@ object KvChainStore {
     // cannot drift on the wire format. ChainTip's codec resolves its ChainPoint dependency at
     // its own definition site — we don't need to re-import ChainPoint's codec here.
     import scalus.cardano.node.stream.engine.persistence.PersistenceCodecs.{given Decoder[ChainTip], given Encoder[ChainTip]}
+
+    // The upstream Data type ships borer Encoder/Decoder instances on its companion but doesn't
+    // expose them as givens; lift them here so the ChainStoreDatumDict path picks them up.
+    private[engine] given Encoder[Data] = Data.dataCborEncoder
+    private[engine] given Decoder[Data] = Data.dataCborDecoder
 
     private[engine] given Encoder[AppliedBlock] with
         def write(w: Writer, b: AppliedBlock): Writer = {

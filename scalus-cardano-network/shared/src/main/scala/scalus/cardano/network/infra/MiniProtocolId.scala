@@ -1,19 +1,25 @@
 package scalus.cardano.network.infra
 
-/** Ouroboros Node-to-Node mini-protocol identifiers, carried in the low 15 bits of the mux SDU
-  * header's protocol field. The enum variants correspond 1:1 to the wire numbers defined in
-  * ouroboros-network's `network-mux` / `cardano-diffusion` protocol tables.
+/** Ouroboros mini-protocol identifiers, carried in the low 15 bits of the mux SDU header's protocol
+  * field. The enum variants correspond 1:1 to the wire numbers defined in ouroboros-network's
+  * `network-mux` / `cardano-diffusion` protocol tables.
   *
-  * M4 implements [[Handshake]] and [[KeepAlive]] end-to-end. The other variants exist so the mux
-  * can recognise and route frames for them even before their state machines land — makes wire-level
-  * debugging easier and lets M5+ plug in without an enum change.
+  * Both Node-to-Node (N2N) and Node-to-Client (N2C) protocols share the same enum; only
+  * [[Handshake]] is shared on the wire (id 0). The remaining N2N variants ([[ChainSync]],
+  * [[BlockFetch]], [[TxSubmission]], [[KeepAlive]], [[PeerSharing]]) and N2C variants
+  * ([[LocalChainSync]], [[LocalTxSubmission]], [[LocalStateQuery]], [[LocalTxMonitor]]) carry
+  * distinct wire ids and a given connection only mounts handlers for one transport's subset.
   */
 enum MiniProtocolId(val wire: Int) {
     case Handshake extends MiniProtocolId(0)
     case ChainSync extends MiniProtocolId(2)
     case BlockFetch extends MiniProtocolId(3)
     case TxSubmission extends MiniProtocolId(4)
+    case LocalChainSync extends MiniProtocolId(5)
+    case LocalTxSubmission extends MiniProtocolId(6)
+    case LocalStateQuery extends MiniProtocolId(7)
     case KeepAlive extends MiniProtocolId(8)
+    case LocalTxMonitor extends MiniProtocolId(9)
     case PeerSharing extends MiniProtocolId(10)
 }
 

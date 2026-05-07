@@ -52,9 +52,9 @@ final class MithrilAsyncRuntime(
     })
 
     /** Real-clock timer for `setTimeout`. Without this, the Rust async runtime's
-      * `setTimeout(cb, ms)` calls would degenerate into immediate microtasks (busy-loop), since
-      * the runtime uses setTimeout for backoff / yield / poll-interval semantics. Posts back to
-      * the WASM dispatcher when fired so single-thread invariants on `currentInstance` hold.
+      * `setTimeout(cb, ms)` calls would degenerate into immediate microtasks (busy-loop), since the
+      * runtime uses setTimeout for backoff / yield / poll-interval semantics. Posts back to the
+      * WASM dispatcher when fired so single-thread invariants on `currentInstance` hold.
       */
     private val timer = Executors.newSingleThreadScheduledExecutor(new ThreadFactory {
         def newThread(r: Runnable): Thread = {
@@ -710,14 +710,13 @@ final class MithrilAsyncRuntime(
     /** ReadableStream placeholders — formerly returned inert values on the assumption "small JSON
       * endpoints use `.text()` / `.arrayBuffer()`." That assumption is **false** for
       * `verify_certificate_chain` (and any reqwest-driven request): the wasm-bindgen-futures
-      * runtime reads response bodies through `body.getReader()` and the BYOB stream API. With
-      * inert stubs the WASM-side reader busy-polls forever waiting for bytes we never supply —
-      * the source of the hours-long 100 % CPU we observed against a 1.4 KB cert-metadata fetch.
+      * runtime reads response bodies through `body.getReader()` and the BYOB stream API. With inert
+      * stubs the WASM-side reader busy-polls forever waiting for bytes we never supply — the source
+      * of the hours-long 100 % CPU we observed against a 1.4 KB cert-metadata fetch.
       *
-      * Until the proper BYOB feeder is wired (queue chunks of `responseBytes` and signal close
-      * when drained), surface the busy-loop as a fast-failing exception rather than a hang. That
-      * way the failing call site appears in the stack trace and we know which method to
-      * implement first.
+      * Until the proper BYOB feeder is wired (queue chunks of `responseBytes` and signal close when
+      * drained), surface the busy-loop as a fast-failing exception rather than a hang. That way the
+      * failing call site appears in the stack trace and we know which method to implement first.
       */
     private def stubStream(label: String): WasmFunctionHandle = new WasmFunctionHandle {
         def apply(instance: Instance, args: Array[? <: Long]): Array[Long] =
@@ -778,10 +777,10 @@ object MithrilAsyncRuntime {
         scribe.Logger("scalus.cardano.node.stream.engine.snapshot.mithril.MithrilAsyncRuntime")
 
     /** Diagnostic counters — process-wide atomic tallies of how often each microtask-scheduling
-      * primitive fires, so we can spot busy-loop patterns without per-call logging. Sampled by
-      * the drain loop every 4096 microtasks and logged at debug level when [[profileEnabled]] is
-      * set (env `SCALUS_MITHRIL_PROFILE=1`). Not threadsafe-paranoid; approximate-correct is fine
-      * for diagnostics.
+      * primitive fires, so we can spot busy-loop patterns without per-call logging. Sampled by the
+      * drain loop every 4096 microtasks and logged at debug level when [[profileEnabled]] is set
+      * (env `SCALUS_MITHRIL_PROFILE=1`). Not threadsafe-paranoid; approximate-correct is fine for
+      * diagnostics.
       */
     private[mithril] val profileEnabled: Boolean =
         sys.env.get("SCALUS_MITHRIL_PROFILE").contains("1")
@@ -800,12 +799,12 @@ object MithrilAsyncRuntime {
       * long-running operations like `verify_certificate_chain`, which walks the chain back to
       * genesis one HTTP round-trip per hop and is otherwise opaque.
       *
-      * Listener delivery is **not** confined to a single thread: [[FetchEvent.Started]] is
-      * emitted synchronously on the WASM dispatcher thread (inside the `fetch` import handler),
-      * while [[FetchEvent.Completed]] and [[FetchEvent.Failed]] are emitted from the JVM
-      * `HttpClient` completion callback thread. Listeners must therefore be thread-safe and must
-      * not assume serialised delivery on a single executor. Throwing inside a listener is caught
-      * and logged but does not propagate to the WASM side.
+      * Listener delivery is **not** confined to a single thread: [[FetchEvent.Started]] is emitted
+      * synchronously on the WASM dispatcher thread (inside the `fetch` import handler), while
+      * [[FetchEvent.Completed]] and [[FetchEvent.Failed]] are emitted from the JVM `HttpClient`
+      * completion callback thread. Listeners must therefore be thread-safe and must not assume
+      * serialised delivery on a single executor. Throwing inside a listener is caught and logged
+      * but does not propagate to the WASM side.
       */
     sealed trait FetchEvent {
         def method: String
@@ -813,9 +812,9 @@ object MithrilAsyncRuntime {
     }
     object FetchEvent {
 
-        /** Issued the moment the WASM client calls `fetch(req)`. `startedNanos` is the
-          * monotonic clock value at issue time — pair with [[Completed.elapsedMs]] /
-          * [[Failed.elapsedMs]] to derive in-flight durations.
+        /** Issued the moment the WASM client calls `fetch(req)`. `startedNanos` is the monotonic
+          * clock value at issue time — pair with [[Completed.elapsedMs]] / [[Failed.elapsedMs]] to
+          * derive in-flight durations.
           */
         final case class Started(method: String, url: String, startedNanos: Long) extends FetchEvent
 

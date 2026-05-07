@@ -13,9 +13,9 @@ import scala.concurrent.{ExecutionContext, Future}
   * support transparently.
   *
   * On Scala.js — and on JVM where the mithril module is not on the classpath —
-  * [[MithrilSnapshotResolver.find]] returns `None`, and the
-  * [[ChainStoreRestorer]] dispatch fails the restore Future with
-  * [[scalus.cardano.node.stream.UnsupportedSourceException]] pointing at M10b.
+  * [[MithrilSnapshotResolver.find]] returns `None`, and the [[ChainStoreRestorer]] dispatch fails
+  * the restore Future with [[scalus.cardano.node.stream.UnsupportedSourceException]] pointing at
+  * M10b.
   */
 trait MithrilSnapshotResolver {
 
@@ -45,8 +45,8 @@ object MithrilSnapshotResolver {
       * is registered. In practice there's only one — `scalus-chain-store-mithril`'s
       * `MithrilSnapshotResolverImpl`. On Scala.js the same path applies: Scala.js implements
       * `java.util.ServiceLoader` and reads `META-INF/services` from the linker classpath, so
-      * absence simply yields `None`. A `ServiceConfigurationError` from a malformed registration
-      * or impl init failure is *not* caught — broken service wiring should be diagnosable, not
+      * absence simply yields `None`. A `ServiceConfigurationError` from a malformed registration or
+      * impl init failure is *not* caught — broken service wiring should be diagnosable, not
       * silently downgraded to `UnsupportedSourceException`.
       */
     def find(): Option[MithrilSnapshotResolver] = {
