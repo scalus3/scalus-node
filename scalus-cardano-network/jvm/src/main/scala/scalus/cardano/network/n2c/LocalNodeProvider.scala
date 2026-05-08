@@ -5,26 +5,30 @@ import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, SlotNo, Transaction, 
 import scalus.cardano.node.{BlockchainProvider, NodeSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError}
 import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot}
 import scalus.cardano.network.NetworkMagic
+import scalus.cardano.network.chainsync.Point
 import scalus.cardano.network.infra.MiniProtocolId
+import scalus.cardano.network.n2c.localstatequery.{LocalStateQueryDriver, LocalStateQueryMessage, LsqQuery}
 import scalus.cardano.network.n2c.localtxsubmission.{LocalTxSubmissionDriver, LocalTxSubmissionRejection}
 import scalus.uplc.builtin.{ByteString, Data}
 import scalus.utils.Hex.toHex
 
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicReference
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
-/** Submit-only `BlockchainProvider` over `LocalTxSubmission` against a local cardano-node.
+/** `BlockchainProvider` against a local cardano-node over N2C.
   *
-  * Owns its own [[NodeToClientConnection]] (one connection per provider instance) plus a
-  * [[LocalTxSubmissionDriver]] talking on [[MiniProtocolId.LocalTxSubmission]]. Read methods
-  * (`findUtxos`, `fetchLatestParams`, `currentSlot`, `getDatum`, `checkTransaction`) raise
-  * [[UnsupportedOperationException]] until `LocalStateQuery` lands in M12 — pair this backup with a
-  * `BackupSource.Blockfrost` if read coverage is needed before then.
+  * Owns its own [[NodeToClientConnection]] plus three mini-protocol drivers:
+  *   - [[LocalTxSubmissionDriver]] on [[MiniProtocolId.LocalTxSubmission]] for `submit`
+  *   - [[LocalStateQueryDriver]] on [[MiniProtocolId.LocalStateQuery]] for `currentSlot` and
+  *     (eventually) the rest of the read surface
+  *   - [[LocalTxSubmissionDriver]]'s connection-root for KeepAlive
   *
-  * The N2C handshake negotiates `query = true` (M12.P1) so the server permits future LSQ /
-  * LocalTxMonitor queries. The drivers themselves wire in once their codecs land — the handshake
-  * flag itself is harmless (server still serves submit + chain-sync identically).
+  * Read methods backed by LSQ today: `currentSlot`. The remaining stubs (`fetchLatestParams`,
+  * `findUtxos`, `checkTransaction`) raise [[UnsupportedOperationException]] until their per-query
+  * result decoders land — `getDatum` returns `None` because LSQ has no datum-by-hash query.
+  *
+  * The N2C handshake negotiates `query = true` so the server permits LSQ queries.
   *
   * Connection-sharing with `ChainSyncSource.N2C` (when both point at the same socket) is a planned
   * optimisation; today each component opens its own connection.
@@ -38,6 +42,7 @@ import scala.concurrent.{ExecutionContext, Future}
 final class LocalNodeProvider private (
     conn: NodeToClientConnection,
     driver: LocalTxSubmissionDriver,
+    lsqDriver: LocalStateQueryDriver,
     val cardanoInfo: CardanoInfo,
     submitEra: Int,
     connectedSinceMillis: Long
@@ -87,23 +92,59 @@ final class LocalNodeProvider private (
 
     def diagnostics: BackupDiagnosticsSnapshot = diagState.get
 
-    /** Tear down the driver + connection. Idempotent. */
-    def close(): Future[Unit] = driver.close().flatMap(_ => conn.close())
+    /** Tear down all drivers + connection. Idempotent. */
+    def close(): Future[Unit] =
+        lsqDriver.close().flatMap(_ => driver.close()).flatMap(_ => conn.close())
 
-    // ---- Read methods deferred to M12 LSQ. ----
+    // -------- LSQ-backed reads --------
+
+    override def currentSlot: Future[SlotNo] = withLsqSnapshot {
+        lsqDriver.query(LsqQuery.GetChainPoint).map {
+            case Point.Origin              => 0L
+            case Point.BlockPoint(slot, _) => slot
+        }
+    }
+
+    /** Async mutex around `acquire → body → release`. Multiple concurrent provider calls (e.g.
+      * parallel `currentSlot` invocations) would otherwise race the LSQ driver's single-in-flight
+      * contract. The previous gate is awaited before this op runs; the new gate is completed
+      * regardless of op outcome.
+      */
+    private val lsqGate = new AtomicReference[Future[Unit]](Future.unit)
+
+    private def withLsqLock[A](op: => Future[A]): Future[A] = {
+        val nextGate = Promise[Unit]()
+        val prev = lsqGate.getAndSet(nextGate.future)
+        prev.transformWith(_ => op).andThen { case _ => nextGate.success(()) }
+    }
+
+    private def withLsqSnapshot[A](body: => Future[A]): Future[A] = withLsqLock {
+        lsqDriver.acquire(LocalStateQueryMessage.AcquireTarget.VolatileTip).flatMap {
+            case Right(()) =>
+                body.transformWith { result =>
+                    lsqDriver
+                        .release()
+                        .recover { case _ => () }
+                        .flatMap(_ => Future.fromTry(result))
+                }
+            case Left(failure) =>
+                Future.failed(new RuntimeException(s"LSQ acquire failed: $failure"))
+        }
+    }
+
+    // -------- Reads still deferred (per-query result CBOR decoders TBD) --------
 
     private def unsupportedRead(name: String): Nothing =
         throw new UnsupportedOperationException(
-          s"$name is not supported by BackupSource.LocalNode — pair with BackupSource.Blockfrost " +
-              "or wait for M12 (LocalStateQuery)"
+          s"$name is not yet implemented by BackupSource.LocalNode — pair with " +
+              "BackupSource.Blockfrost, or wait for the per-query LSQ result decoder"
         )
 
     override def fetchLatestParams: Future[ProtocolParams] = unsupportedRead("fetchLatestParams")
     override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] =
         unsupportedRead("findUtxos")
-    override def currentSlot: Future[SlotNo] = unsupportedRead("currentSlot")
     override def getDatum(datumHash: scalus.cardano.ledger.DataHash): Future[Option[Data]] =
-        unsupportedRead("getDatum")
+        Future.successful(None)
     override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =
         unsupportedRead("checkTransaction")
 }
@@ -125,13 +166,18 @@ object LocalNodeProvider {
     )(using ExecutionContext): Future[LocalNodeProvider] = {
         val config = ClientConfig.default.copy(query = true)
         NodeToClientClient.connect(socketPath, networkMagic, config).map { conn =>
-            val driver = new LocalTxSubmissionDriver(
+            val submitDriver = new LocalTxSubmissionDriver(
               conn.channel(MiniProtocolId.LocalTxSubmission),
+              conn.rootToken
+            )
+            val lsqDriver = new LocalStateQueryDriver(
+              conn.channel(MiniProtocolId.LocalStateQuery),
               conn.rootToken
             )
             new LocalNodeProvider(
               conn,
-              driver,
+              submitDriver,
+              lsqDriver,
               cardanoInfo,
               submitEra,
               connectedSinceMillis = System.currentTimeMillis()

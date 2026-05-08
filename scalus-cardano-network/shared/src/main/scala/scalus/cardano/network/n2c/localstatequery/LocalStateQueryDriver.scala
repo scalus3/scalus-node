@@ -3,8 +3,11 @@ package scalus.cardano.network.n2c.localstatequery
 import scalus.cardano.infra.CancelToken
 import scalus.cardano.network.infra.{CborMessageStream, MiniProtocolBytes, MiniProtocolId}
 import scalus.cardano.network.n2c.localstatequery.LocalStateQueryMessage.*
+import scalus.serialization.cbor.Cbor
+import scalus.uplc.builtin.ByteString
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.NonFatal
 
 /** Initiator-side driver for the LocalStateQuery mini-protocol (id 7).
   *
@@ -89,16 +92,47 @@ final class LocalStateQueryDriver(
             }
     }
 
+    /** Issue a typed query against the held snapshot. Caller must have completed an [[acquire]]
+      * (`Right(())`) before calling.
+      *
+      * The future fails on:
+      *   - `IllegalStateException` if the driver is closed or no snapshot is held
+      *   - `IllegalStateException` if the peer sends an unexpected message in `Querying`
+      *   - whatever the per-query result decoder raises on malformed result bytes
+      *   - `IllegalStateException` if the peer EOFs mid-query
+      */
+    def query[A](q: LsqQuery[A]): Future[A] = {
+        if closed then return Future.failed(new IllegalStateException("driver closed"))
+        if !acquired then
+            return Future.failed(
+              new IllegalStateException("no snapshot acquired; call acquire() first")
+            )
+        val queryBytes = ByteString.fromArray(Cbor.encode(q: LsqQuery[?]))
+        stream
+            .send(MsgQuery(queryBytes), cancelToken)
+            .flatMap(_ => stream.receive(cancelToken))
+            .flatMap {
+                case Some(MsgResult(resultBytes)) =>
+                    try Future.successful(LsqQuery.decodeResult(q, resultBytes.bytes))
+                    catch case NonFatal(t) => Future.failed(t)
+                case Some(other) =>
+                    Future.failed(unexpectedMessage("awaiting Result", other))
+                case None =>
+                    Future.failed(new IllegalStateException("peer closed LSQ mid-query"))
+            }
+    }
+
     /** Release the current snapshot, returning to `Idle`. One-way notification — the server does
       * not reply. Caller may follow with another [[acquire]] or [[close]].
+      *
+      * Local `acquired` flag is reset before the send so that, on a wire failure mid-release, the
+      * next [[acquire]] surfaces the connection error rather than a stale "already acquired" guard.
       */
     def release(): Future[Unit] = {
         if closed then return Future.failed(new IllegalStateException("driver closed"))
         if !acquired then return Future.failed(new IllegalStateException("no snapshot acquired"))
-        stream.send(MsgRelease, cancelToken).map { _ =>
-            acquired = false
-            ()
-        }
+        acquired = false
+        stream.send(MsgRelease, cancelToken)
     }
 
     /** Send `MsgDone` best-effort and mark the driver closed. If a snapshot is currently acquired,
@@ -110,18 +144,15 @@ final class LocalStateQueryDriver(
         if closed then return Future.unit
         closed = true
         val toIdle: Future[Unit] =
-            if acquired then
+            if acquired then {
+                acquired = false
                 stream
                     .send(MsgRelease, CancelToken.never)
-                    .map { _ =>
-                        acquired = false
-                        ()
-                    }
                     .recover { case t =>
                         logger.debug(s"MsgRelease best-effort send failed: $t")
                         ()
                     }
-            else Future.unit
+            } else Future.unit
         toIdle.flatMap { _ =>
             stream.send(MsgDone, CancelToken.never).recover { case t =>
                 logger.debug(s"MsgDone best-effort send failed: $t")
