@@ -14,16 +14,15 @@ import scala.concurrent.{ExecutionContext, Future}
   *   Idle      ──MsgAcquire(target)────→ Acquiring
   *             Acquiring ──MsgAcquired──→ Acquired
   *             Acquiring ──MsgFailure──→ Idle    (snapshot rejected)
-  *   Acquired  ──MsgQuery─────────────→ Querying       ← P1.b
-  *             Querying  ──MsgResult──→ Acquired       ← P1.b
+  *   Acquired  ──MsgQuery─────────────→ Querying
+  *             Querying  ──MsgResult──→ Acquired
   *   Acquired  ──MsgRelease───────────→ Idle
-  *   Acquired  ──MsgReAcquire(target)─→ Acquiring      ← deferred
+  *   Acquired  ──MsgReAcquire(target)─→ Acquiring
   *   Idle      ──MsgDone──────────────→ Done           (best-effort on shutdown)
   * }}}
   *
-  * **P1.a scope.** This driver covers acquire / release / close — enough to negotiate snapshot
-  * ownership against the node and validate the wire codec end-to-end. The `query[A]` surface lands
-  * in P1.b together with the `LsqQuery` GADT and its per-query result decoders.
+  * Today this driver implements `acquire` / `release` / `close`; `query[A]` and `reAcquire` land
+  * alongside the `LsqQuery` GADT in a follow-up.
   *
   * Single in-flight contract: callers MUST await the previous `Future` before issuing the next
   * call. Mirrors the same single-consumer contract as
@@ -68,7 +67,7 @@ final class LocalStateQueryDriver(
         if acquired then
             return Future.failed(
               new IllegalStateException(
-                "snapshot already acquired — release() first, or use reAcquire() (P1.b)"
+                "snapshot already acquired — release() first, or use reAcquire() once it lands"
               )
             )
         stream

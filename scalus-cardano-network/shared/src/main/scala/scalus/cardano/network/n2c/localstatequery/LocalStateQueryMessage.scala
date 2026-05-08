@@ -41,21 +41,17 @@ sealed trait LocalStateQueryMessage
 
 object LocalStateQueryMessage {
 
-    /** Where to acquire a snapshot from. The same target type appears under both `MsgAcquire` and
-      * `MsgReAcquire`; the wire encoding's tag depends on the message it sits under (see codec).
+    /** Where to acquire a snapshot from. Shared by `MsgAcquire` and `MsgReAcquire` — the wire tag
+      * distinguishes them.
       */
     sealed trait AcquireTarget
     object AcquireTarget {
-
-        /** Acquire (or re-acquire) at a specific chain point. */
         final case class At(point: Point) extends AcquireTarget
-
-        /** Acquire (or re-acquire) at the current volatile tip — the chain's current best. */
         case object VolatileTip extends AcquireTarget
 
-        /** Acquire (or re-acquire) at the current immutable tip — the most recent block past the
-          * `k`-deep stability horizon. Cheaper for the node to serve large queries from than
-          * `VolatileTip` because nothing about the snapshot can be rolled back.
+        /** The most recent block past the `k`-deep stability horizon. Cheaper for the node to serve
+          * large queries from than `VolatileTip` because nothing in the snapshot can be rolled
+          * back.
           */
         case object ImmutableTip extends AcquireTarget
     }
@@ -110,23 +106,22 @@ object LocalStateQueryMessage {
 
     given Encoder[LocalStateQueryMessage] with
         def write(w: Writer, m: LocalStateQueryMessage): Writer = m match {
-            case MsgAcquire(target) =>
-                writeAcquire(w, atTag = 0, tipTag = 8, immutableTag = 10, target)
-            case MsgAcquired => w.writeArrayHeader(1).writeInt(1)
-            case MsgFailure(f) =>
-                w.writeArrayHeader(2).writeInt(2).writeInt(f.tag)
-            case MsgQuery(bytes) =>
-                w.writeArrayHeader(2).writeInt(3)
-                w.output.writeBytes(bytes.bytes)
-                w
-            case MsgResult(bytes) =>
-                w.writeArrayHeader(2).writeInt(4)
-                w.output.writeBytes(bytes.bytes)
-                w
-            case MsgRelease => w.writeArrayHeader(1).writeInt(5)
-            case MsgReAcquire(target) =>
-                writeAcquire(w, atTag = 6, tipTag = 9, immutableTag = 11, target)
-            case MsgDone => w.writeArrayHeader(1).writeInt(7)
+            case MsgAcquire(AcquireTarget.At(point)) =>
+                w.writeArrayHeader(2).writeInt(0)
+                w.write(point)
+            case MsgAcquire(AcquireTarget.VolatileTip)  => w.writeArrayHeader(1).writeInt(8)
+            case MsgAcquire(AcquireTarget.ImmutableTip) => w.writeArrayHeader(1).writeInt(10)
+            case MsgAcquired                            => w.writeArrayHeader(1).writeInt(1)
+            case MsgFailure(f)    => w.writeArrayHeader(2).writeInt(2).writeInt(f.tag)
+            case MsgQuery(bytes)  => writeRawBodyMessage(w, tag = 3, bytes)
+            case MsgResult(bytes) => writeRawBodyMessage(w, tag = 4, bytes)
+            case MsgRelease       => w.writeArrayHeader(1).writeInt(5)
+            case MsgReAcquire(AcquireTarget.At(point)) =>
+                w.writeArrayHeader(2).writeInt(6)
+                w.write(point)
+            case MsgReAcquire(AcquireTarget.VolatileTip)  => w.writeArrayHeader(1).writeInt(9)
+            case MsgReAcquire(AcquireTarget.ImmutableTip) => w.writeArrayHeader(1).writeInt(11)
+            case MsgDone                                  => w.writeArrayHeader(1).writeInt(7)
         }
 
     given (using OriginalCborByteArray): Decoder[LocalStateQueryMessage] with
@@ -152,20 +147,14 @@ object LocalStateQueryMessage {
             }
         }
 
-    private def writeAcquire(
-        w: Writer,
-        atTag: Int,
-        tipTag: Int,
-        immutableTag: Int,
-        target: AcquireTarget
-    ): Writer = target match {
-        case AcquireTarget.At(point) =>
-            w.writeArrayHeader(2).writeInt(atTag)
-            w.write(point)
-        case AcquireTarget.VolatileTip =>
-            w.writeArrayHeader(1).writeInt(tipTag)
-        case AcquireTarget.ImmutableTip =>
-            w.writeArrayHeader(1).writeInt(immutableTag)
+    /** `[tag, <raw CBOR>]` — used by both `MsgQuery` and `MsgResult`. The body is spliced via
+      * `w.output.writeBytes(...)` so the inner CBOR is inlined verbatim, not wrapped in a tag-24
+      * byte string.
+      */
+    private def writeRawBodyMessage(w: Writer, tag: Int, bytes: ByteString): Writer = {
+        w.writeArrayHeader(2).writeInt(tag)
+        w.output.writeBytes(bytes.bytes)
+        w
     }
 
     private def readFailure(r: Reader): MsgFailure = {
