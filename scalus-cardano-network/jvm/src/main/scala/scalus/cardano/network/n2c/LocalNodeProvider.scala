@@ -22,6 +22,10 @@ import scala.concurrent.{ExecutionContext, Future}
   * [[UnsupportedOperationException]] until `LocalStateQuery` lands in M12 — pair this backup with a
   * `BackupSource.Blockfrost` if read coverage is needed before then.
   *
+  * The N2C handshake negotiates `query = true` (M12.P1) so the server permits future LSQ /
+  * LocalTxMonitor queries. The drivers themselves wire in once their codecs land — the handshake
+  * flag itself is harmless (server still serves submit + chain-sync identically).
+  *
   * Connection-sharing with `ChainSyncSource.N2C` (when both point at the same socket) is a planned
   * optimisation; today each component opens its own connection.
   *
@@ -119,7 +123,8 @@ object LocalNodeProvider {
         cardanoInfo: CardanoInfo,
         submitEra: Int = 6
     )(using ExecutionContext): Future[LocalNodeProvider] = {
-        NodeToClientClient.connect(socketPath, networkMagic).map { conn =>
+        val config = ClientConfig.default.copy(query = true)
+        NodeToClientClient.connect(socketPath, networkMagic, config).map { conn =>
             val driver = new LocalTxSubmissionDriver(
               conn.channel(MiniProtocolId.LocalTxSubmission),
               conn.rootToken
