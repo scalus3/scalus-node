@@ -123,18 +123,10 @@ final class LocalNodeProvider private (
       * than fetching everything and filtering client-side.
       */
     override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] = query match {
-        case s @ UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
-            withLsqSnapshot {
-                lsqDriver
-                    .query(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
-                    .map(Right(_))
-            }
-        case s @ UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
-            withLsqSnapshot {
-                lsqDriver
-                    .query(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
-                    .map(Right(_))
-            }
+        case UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
+            runUtxoLsq(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
+        case UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
+            runUtxoLsq(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
         case other =>
             Future.successful(
               Left(
@@ -147,6 +139,9 @@ final class LocalNodeProvider private (
               )
             )
     }
+
+    private def runUtxoLsq(q: LsqQuery[Utxos]): Future[Either[UtxoQueryError, Utxos]] =
+        withLsqSnapshot(lsqDriver.query(q).map(Right(_)))
 
     /** Async mutex around `acquire → body → release`. Multiple concurrent provider calls (e.g.
       * parallel `currentSlot` invocations) would otherwise race the LSQ driver's single-in-flight

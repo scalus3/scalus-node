@@ -45,6 +45,22 @@ sealed trait LsqQuery[A]:
 
 object LsqQuery {
 
+    /** Wire tags for the inner `shelleyQuery` element (last array of the QueryIfCurrent envelope).
+      * See `Ouroboros.Consensus.Shelley.Ledger.Query` in the consensus repo for the authoritative
+      * list; only the ones used here are enumerated.
+      */
+    private object ShelleyQueryTag {
+        val GetCurrentPParams: Int = 3
+        val GetUTxOByAddress: Int = 6
+        val GetUTxOByTxIn: Int = 15
+    }
+
+    /** Borer's auto-derived `Map[K, V]` decoder, given `TransactionInput derives Codec` and the
+      * hand-written `given Decoder[TransactionOutput]` in scalus-core.
+      */
+    private def decodeUtxoMap(bytes: Array[Byte]): Utxos =
+        Cborer.decode(bytes).to[Map[TransactionInput, TransactionOutput]].value
+
     /** Top-level `GetChainPoint`. Returns the current tip point of the snapshot the client is
       * holding (`[]` for Origin, `[slot, hash]` otherwise — same wire shape as chain-sync).
       */
@@ -82,7 +98,7 @@ object LsqQuery {
             if bytes.length < 2 || bytes(0) != 0x82.toByte then
                 throw new IllegalArgumentException(
                   "LSQ QueryIfCurrent envelope: expected CBOR array(2) header (0x82) at byte 0; " +
-                      s"got 0x${bytes.headOption.map(_ & 0xff).getOrElse(0).toHexString}"
+                      f"got 0x${bytes.headOption.map(_ & 0xff).getOrElse(0)}%02x"
                 )
             bytes(1) match {
                 case 0x00 =>
@@ -94,7 +110,7 @@ object LsqQuery {
                     )
                 case other =>
                     throw new IllegalArgumentException(
-                      s"LSQ QueryIfCurrent envelope: tag must be 0 or 1, got 0x${(other & 0xff).toHexString}"
+                      f"LSQ QueryIfCurrent envelope: tag must be 0 or 1, got 0x${other & 0xff}%02x"
                     )
             }
         }
@@ -106,39 +122,40 @@ object LsqQuery {
     final case class GetCurrentPParams[A](era: Int, decoder: Array[Byte] => A)
         extends QueryIfCurrent[A]:
         protected def writeShelleyQuery(w: Writer): Writer =
-            w.writeArrayHeader(1).writeInt(3)
+            w.writeArrayHeader(1).writeInt(ShelleyQueryTag.GetCurrentPParams)
         protected def decodeInner(bytes: Array[Byte]): A = decoder(bytes)
 
-    /** `QueryIfCurrent era (GetUTxOByAddress addrs)` — UTxOs at any of the given addresses.
-      * shelleyQuery tag = 6; the address set is wire-encoded with the Conway tag-258 set prefix
-      * (`cardano-node` accepts both bare-array and tagged forms but emits tagged on Conway+).
+    /** `QueryIfCurrent era (GetUTxOByAddress addrs)` — UTxOs at any of the given addresses. The
+      * address set is wire-encoded with the Conway tag-258 set prefix (`cardano-node` accepts both
+      * bare-array and tagged forms but emits tagged on Conway+).
       *
       * Result CBOR is the bare `Map[TransactionInput, TransactionOutput]` produced by
       * `cardano-ledger`'s `EncCBOR (UTxO era)`; borer auto-derives the Map decoder from the per-key
       * and per-value givens already in scope (`TransactionInput derives Codec`,
       * `given Decoder[TransactionOutput]`).
+      *
+      * Note: `TaggedSortedSet.writeTagged` is invoked directly rather than via
+      * `w.write(TaggedSortedSet.from(addresses))` because scalus does not currently provide an
+      * `Ordering[Address]`. Element order on the wire follows iteration order of the input `Set`.
       */
     final case class GetUTxOByAddress(era: Int, addresses: Set[Address])
         extends QueryIfCurrent[Utxos]:
         protected def writeShelleyQuery(w: Writer): Writer = {
-            w.writeArrayHeader(2).writeInt(6)
+            w.writeArrayHeader(2).writeInt(ShelleyQueryTag.GetUTxOByAddress)
             TaggedSortedSet.writeTagged(w, addresses)
         }
-        protected def decodeInner(bytes: Array[Byte]): Utxos =
-            Cborer.decode(bytes).to[Map[TransactionInput, TransactionOutput]].value
+        protected def decodeInner(bytes: Array[Byte]): Utxos = decodeUtxoMap(bytes)
 
     /** `QueryIfCurrent era (GetUTxOByTxIn inputs)` — UTxOs at any of the given transaction inputs.
-      * shelleyQuery tag = 15; the input set is wire-encoded with the Conway tag-258 set prefix.
-      * Result has the same shape as `GetUTxOByAddress`.
+      * Wire shape parallels [[GetUTxOByAddress]]; result has the same shape.
       */
     final case class GetUTxOByTxIn(era: Int, inputs: Set[TransactionInput])
         extends QueryIfCurrent[Utxos]:
         protected def writeShelleyQuery(w: Writer): Writer = {
-            w.writeArrayHeader(2).writeInt(15)
+            w.writeArrayHeader(2).writeInt(ShelleyQueryTag.GetUTxOByTxIn)
             TaggedSortedSet.writeTagged(w, inputs)
         }
-        protected def decodeInner(bytes: Array[Byte]): Utxos =
-            Cborer.decode(bytes).to[Map[TransactionInput, TransactionOutput]].value
+        protected def decodeInner(bytes: Array[Byte]): Utxos = decodeUtxoMap(bytes)
 
     /** Single shared encoder — every case dispatches through its own `write`. */
     given Encoder[LsqQuery[?]] with
