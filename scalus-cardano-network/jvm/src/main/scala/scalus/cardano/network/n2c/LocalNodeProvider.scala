@@ -1,7 +1,7 @@
 package scalus.cardano.network.n2c
 
 import io.bullet.borer.Cbor
-import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
+import scalus.cardano.ledger.{CardanoInfo, ConwayProtocolParams, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
 import scalus.cardano.node.{BlockchainProvider, NodeSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError}
 import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot}
 import scalus.cardano.network.NetworkMagic
@@ -24,9 +24,10 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
   *     (eventually) the rest of the read surface
   *   - [[LocalTxSubmissionDriver]]'s connection-root for KeepAlive
   *
-  * Read methods backed by LSQ today: `currentSlot`. The remaining stubs (`fetchLatestParams`,
-  * `findUtxos`, `checkTransaction`) raise [[UnsupportedOperationException]] until their per-query
-  * result decoders land — `getDatum` returns `None` because LSQ has no datum-by-hash query.
+  * Read methods backed by LSQ today: `currentSlot`, `fetchLatestParams` (Conway-only). The
+  * remaining stubs (`findUtxos`, `checkTransaction`) raise [[UnsupportedOperationException]] until
+  * their per-query result decoders land — `getDatum` returns `None` because LSQ has no
+  * datum-by-hash query.
   *
   * The N2C handshake negotiates `query = true` so the server permits LSQ queries.
   *
@@ -105,6 +106,15 @@ final class LocalNodeProvider private (
         }
     }
 
+    override def fetchLatestParams: Future[ProtocolParams] = withLsqSnapshot {
+        lsqDriver.query(
+          LsqQuery.GetCurrentPParams(
+            era = submitEra,
+            decoder = bytes => ConwayProtocolParams.fromCbor(bytes).toProtocolParams
+          )
+        )
+    }
+
     /** Async mutex around `acquire → body → release`. Multiple concurrent provider calls (e.g.
       * parallel `currentSlot` invocations) would otherwise race the LSQ driver's single-in-flight
       * contract. The previous gate is awaited before this op runs; the new gate is completed
@@ -140,7 +150,6 @@ final class LocalNodeProvider private (
               "BackupSource.Blockfrost, or wait for the per-query LSQ result decoder"
         )
 
-    override def fetchLatestParams: Future[ProtocolParams] = unsupportedRead("fetchLatestParams")
     override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] =
         unsupportedRead("findUtxos")
     override def getDatum(datumHash: scalus.cardano.ledger.DataHash): Future[Option[Data]] =

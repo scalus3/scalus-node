@@ -20,32 +20,50 @@ import scalus.cardano.network.chainsync.Point
   *
   *   era-dispatch     =  [0, 0]                 ; Byron  (only GetUpdateInterfaceState)
   *                    /  [N, <shelleyQuery>]    ; Shelley=1 .. Conway=6
+  *
+  *   shelleyQuery     =  [3]                    ; GetCurrentPParams  (used here)
+  *                    /  [0] / [1] / ...        ; GetLedgerTip / GetEpochNo / ...
   * }}}
   *
-  * Result encodings carry no tagging — the client decodes against the outstanding query type.
-  *
-  * P1.b ships only `GetChainPoint`; `GetCurrentPParams`, `GetCurrentEra`, `GetUTxOByAddress`,
-  * `GetUTxOByTxIn` follow once their per-era result CBOR decoders are in place.
+  * Each case provides its own encode/decode — keeps this module independent of any specific era's
+  * result-CBOR shape, which often lives in platform-specific scalus modules (e.g.
+  * [[scalus.cardano.ledger.ConwayProtocolParams]] is JVM-only).
   */
-sealed trait LsqQuery[A]
+sealed trait LsqQuery[A]:
+    /** Splice the query body into `MsgQuery`. */
+    def write(w: Writer): Writer
+
+    /** Decode the result CBOR (the opaque payload of `MsgResult`) into a typed value. */
+    def decode(bytes: Array[Byte]): A
 
 object LsqQuery {
 
     /** Top-level `GetChainPoint`. Returns the current tip point of the snapshot the client is
       * holding (`[]` for Origin, `[slot, hash]` otherwise — same wire shape as chain-sync).
       */
-    case object GetChainPoint extends LsqQuery[Point]
+    case object GetChainPoint extends LsqQuery[Point]:
+        def write(w: Writer): Writer = w.writeArrayHeader(1).writeInt(3)
+        def decode(bytes: Array[Byte]): Point = Cborer.decode(bytes).to[Point].value
 
-    /** Encode the query body — what the driver splices into `MsgQuery`. */
-    given Encoder[LsqQuery[?]] with
-        def write(w: Writer, q: LsqQuery[?]): Writer = q match {
-            case GetChainPoint => w.writeArrayHeader(1).writeInt(3)
-        }
-
-    /** Decode the result bytes for the outstanding query. The match arms narrow `A` per case (Scala
-      * 3 GADT pattern matching).
+    /** Per-era `GetCurrentPParams` — wraps as `QueryIfCurrent era (ShelleyQuery 3)`. The result
+      * decoder is injected because each era's PParams CBOR is decoded by its own scalus class (e.g.
+      * [[scalus.cardano.ledger.ConwayProtocolParams]] for Conway), several of which are JVM-only.
       */
-    def decodeResult[A](q: LsqQuery[A], bytes: Array[Byte]): A = q match {
-        case GetChainPoint => Cborer.decode(bytes).to[Point].value
-    }
+    final case class GetCurrentPParams[A](era: Int, decoder: Array[Byte] => A) extends LsqQuery[A]:
+        def write(w: Writer): Writer =
+            // [0, [0, [era, [3]]]]
+            //   ^   ^   ^    ^
+            //   |   |   |    shelleyQuery: GetCurrentPParams
+            //   |   |   era-dispatch
+            //   |   BlockQuery: QueryIfCurrent
+            //   top: BlockQuery
+            w.writeArrayHeader(2).writeInt(0)
+            w.writeArrayHeader(2).writeInt(0)
+            w.writeArrayHeader(2).writeInt(era)
+            w.writeArrayHeader(1).writeInt(3)
+        def decode(bytes: Array[Byte]): A = decoder(bytes)
+
+    /** Single shared encoder — every case dispatches through its own `write`. */
+    given Encoder[LsqQuery[?]] with
+        def write(w: Writer, q: LsqQuery[?]): Writer = q.write(w)
 }

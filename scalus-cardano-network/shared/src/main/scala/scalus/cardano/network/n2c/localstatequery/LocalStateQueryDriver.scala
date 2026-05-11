@@ -113,7 +113,7 @@ final class LocalStateQueryDriver(
             .flatMap(_ => stream.receive(cancelToken))
             .flatMap {
                 case Some(MsgResult(resultBytes)) =>
-                    try Future.successful(LsqQuery.decodeResult(q, resultBytes.bytes))
+                    try Future.successful(q.decode(resultBytes.bytes))
                     catch case NonFatal(t) => Future.failed(t)
                 case Some(other) =>
                     Future.failed(unexpectedMessage("awaiting Result", other))
