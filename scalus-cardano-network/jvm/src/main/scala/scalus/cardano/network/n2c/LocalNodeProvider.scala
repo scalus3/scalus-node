@@ -2,7 +2,7 @@ package scalus.cardano.network.n2c
 
 import io.bullet.borer.Cbor
 import scalus.cardano.ledger.{CardanoInfo, ConwayProtocolParams, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
-import scalus.cardano.node.{BlockchainProvider, NodeSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError}
+import scalus.cardano.node.{BlockchainProvider, NodeSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot}
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.chainsync.Point
@@ -24,10 +24,11 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
   *     (eventually) the rest of the read surface
   *   - [[LocalTxSubmissionDriver]]'s connection-root for KeepAlive
   *
-  * Read methods backed by LSQ today: `currentSlot`, `fetchLatestParams` (Conway-only). The
-  * remaining stubs (`findUtxos`, `checkTransaction`) raise [[UnsupportedOperationException]] until
-  * their per-query result decoders land — `getDatum` returns `None` because LSQ has no
-  * datum-by-hash query.
+  * Read methods backed by LSQ today: `currentSlot`, `fetchLatestParams` (Conway-only), `findUtxos`
+  * (trivial single-source `FromAddress` / `FromInputs` queries — anything richer returns
+  * [[UtxoQueryError.NotSupported]]). `checkTransaction` still raises
+  * [[UnsupportedOperationException]] (LocalTxMonitor is a separate mini-protocol, not LSQ);
+  * `getDatum` returns `None` because LSQ has no datum-by-hash query.
   *
   * The N2C handshake negotiates `query = true` so the server permits LSQ queries.
   *
@@ -115,6 +116,38 @@ final class LocalNodeProvider private (
         )
     }
 
+    /** Only single-source `FromAddress(addr)` and `FromInputs(inputs)` map cleanly onto LSQ; the
+      * filter / limit / offset / minTotal facets of [[UtxoQuery.Simple]] and the `Or`/`And` source
+      * combinators have no LSQ representation. Callers wanting richer queries should pair with a
+      * `BackupSource.Blockfrost`; here we surface them as [[UtxoQueryError.NotSupported]] rather
+      * than fetching everything and filtering client-side.
+      */
+    override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] = query match {
+        case s @ UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
+            withLsqSnapshot {
+                lsqDriver
+                    .query(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
+                    .map(Right(_))
+            }
+        case s @ UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
+            withLsqSnapshot {
+                lsqDriver
+                    .query(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
+                    .map(Right(_))
+            }
+        case other =>
+            Future.successful(
+              Left(
+                UtxoQueryError.NotSupported(
+                  query = other,
+                  reason = "LocalNodeProvider supports only Simple(FromAddress) / " +
+                      "Simple(FromInputs) without filter/limit/offset/minTotal; " +
+                      "pair with BackupSource.Blockfrost for richer queries"
+                )
+              )
+            )
+    }
+
     /** Async mutex around `acquire → body → release`. Multiple concurrent provider calls (e.g.
       * parallel `currentSlot` invocations) would otherwise race the LSQ driver's single-in-flight
       * contract. The previous gate is awaited before this op runs; the new gate is completed
@@ -150,8 +183,6 @@ final class LocalNodeProvider private (
               "BackupSource.Blockfrost, or wait for the per-query LSQ result decoder"
         )
 
-    override def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] =
-        unsupportedRead("findUtxos")
     override def getDatum(datumHash: scalus.cardano.ledger.DataHash): Future[Option[Data]] =
         Future.successful(None)
     override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =

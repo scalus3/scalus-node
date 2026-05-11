@@ -2,6 +2,8 @@ package scalus.cardano.network.n2c.localstatequery
 
 import io.bullet.borer.{Encoder, Writer}
 import io.bullet.borer.Cbor as Cborer
+import scalus.cardano.address.Address
+import scalus.cardano.ledger.{TaggedSortedSet, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.network.chainsync.Point
 
 /** Typed `LocalStateQuery` queries (top-level / HFC-wrapped / per-era).
@@ -61,7 +63,20 @@ object LsqQuery {
       */
     sealed trait QueryIfCurrent[A] extends LsqQuery[A]:
         def era: Int
+
+        /** Splice the shelleyQuery portion (the innermost array). The outer `[0, [0, [era, ...]]]`
+          * wrap is centralised in [[write]].
+          */
+        protected def writeShelleyQuery(w: Writer): Writer
+
         protected def decodeInner(bytes: Array[Byte]): A
+
+        final def write(w: Writer): Writer = {
+            w.writeArrayHeader(2).writeInt(0)
+            w.writeArrayHeader(2).writeInt(0)
+            w.writeArrayHeader(2).writeInt(era)
+            writeShelleyQuery(w)
+        }
 
         final def decode(bytes: Array[Byte]): A = {
             if bytes.length < 2 || bytes(0) != 0x82.toByte then
@@ -90,12 +105,40 @@ object LsqQuery {
       */
     final case class GetCurrentPParams[A](era: Int, decoder: Array[Byte] => A)
         extends QueryIfCurrent[A]:
-        def write(w: Writer): Writer =
-            w.writeArrayHeader(2).writeInt(0)
-            w.writeArrayHeader(2).writeInt(0)
-            w.writeArrayHeader(2).writeInt(era)
+        protected def writeShelleyQuery(w: Writer): Writer =
             w.writeArrayHeader(1).writeInt(3)
         protected def decodeInner(bytes: Array[Byte]): A = decoder(bytes)
+
+    /** `QueryIfCurrent era (GetUTxOByAddress addrs)` — UTxOs at any of the given addresses.
+      * shelleyQuery tag = 6; the address set is wire-encoded with the Conway tag-258 set prefix
+      * (`cardano-node` accepts both bare-array and tagged forms but emits tagged on Conway+).
+      *
+      * Result CBOR is the bare `Map[TransactionInput, TransactionOutput]` produced by
+      * `cardano-ledger`'s `EncCBOR (UTxO era)`; borer auto-derives the Map decoder from the per-key
+      * and per-value givens already in scope (`TransactionInput derives Codec`,
+      * `given Decoder[TransactionOutput]`).
+      */
+    final case class GetUTxOByAddress(era: Int, addresses: Set[Address])
+        extends QueryIfCurrent[Utxos]:
+        protected def writeShelleyQuery(w: Writer): Writer = {
+            w.writeArrayHeader(2).writeInt(6)
+            TaggedSortedSet.writeTagged(w, addresses)
+        }
+        protected def decodeInner(bytes: Array[Byte]): Utxos =
+            Cborer.decode(bytes).to[Map[TransactionInput, TransactionOutput]].value
+
+    /** `QueryIfCurrent era (GetUTxOByTxIn inputs)` — UTxOs at any of the given transaction inputs.
+      * shelleyQuery tag = 15; the input set is wire-encoded with the Conway tag-258 set prefix.
+      * Result has the same shape as `GetUTxOByAddress`.
+      */
+    final case class GetUTxOByTxIn(era: Int, inputs: Set[TransactionInput])
+        extends QueryIfCurrent[Utxos]:
+        protected def writeShelleyQuery(w: Writer): Writer = {
+            w.writeArrayHeader(2).writeInt(15)
+            TaggedSortedSet.writeTagged(w, inputs)
+        }
+        protected def decodeInner(bytes: Array[Byte]): Utxos =
+            Cborer.decode(bytes).to[Map[TransactionInput, TransactionOutput]].value
 
     /** Single shared encoder — every case dispatches through its own `write`. */
     given Encoder[LsqQuery[?]] with
