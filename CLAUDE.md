@@ -77,6 +77,7 @@ Several probes/suites are gated by env vars so `sbt test` and CI don't pull larg
 - `SCALUS_N2N_PREVIEW_IT=1` — `PreviewRelaySmokeSuite` (real testnet relay).
 - `SCALUS_MITHRIL_FULL_PREVIEW=1` — `MithrilFullPreviewProbe` (downloads the full preview snapshot via Mithril; multi-GB).
 - `SCALUS_IMMUTABLEDB_SRC=<path>` — `ImmutableDbReadProbe` / `ImmutableDbRestoreProbe` (point at an already-extracted snapshot).
+- `SCALUS_N2C_SOCKET=<path>` — `LocalNodeProviderN2cProbe` (point at a live cardano-node Unix socket; optional `SCALUS_N2C_NETWORK_MAGIC` defaults to 42 = yaci-devnet).
 
 Helper scripts in `scripts/` set these env vars and shell out to `sbt`:
 - `download_preview.sh`     — downloads via `MithrilFullPreviewProbe`.

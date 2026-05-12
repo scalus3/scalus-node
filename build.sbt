@@ -10,7 +10,7 @@ autoCompilerPlugins := true
 
 // Latest scalus snapshot — published to Sonatype Central Snapshots.
 // Bump when a newer snapshot is needed.
-val scalusVersion = "0.17.0+11-e1a753ab-SNAPSHOT"
+val scalusVersion = "0.17.0+74-904e773c-SNAPSHOT"
 
 val cardanoClientLibVersion = "0.7.1"
 val yaciVersion = "0.4.0"

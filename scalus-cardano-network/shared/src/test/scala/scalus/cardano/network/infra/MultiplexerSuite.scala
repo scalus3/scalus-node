@@ -139,24 +139,30 @@ class MultiplexerSuite extends AnyFunSuite with ScalaFutures with Eventually {
     test("bounded mailbox overflow surfaces on the state machine's next pull") {
         val (mux, peer, root) = muxOnPipe(MuxConfig(mailboxCapacity = DeltaBufferPolicy.Bounded(3)))
         val hs = mux.channel(MiniProtocolId.Handshake)
+        val ka = mux.channel(MiniProtocolId.KeepAlive) // sync barrier on a separate route
 
-        // Flood far more than capacity. No puller active yet; offers fill the buffer and the
-        // next offer after capacity triggers the overflow terminal.
+        // Flood Handshake past capacity. No puller active yet; offers fill the buffer (3),
+        // then the (capacity+1)th offer sets terminal=overflow. Subsequent offers no-op.
         for i <- 0 until 50 do
             peerSend(peer, MiniProtocolId.Handshake, ByteString.fromArray(Array[Byte](i.toByte)))
 
-        // Drain until the overflow arrives via pull. The mailbox is pure transport; the
-        // state machine (pull consumer) sees the failure and decides how to escalate.
-        var sawOverflow = false
-        var pulls = 0
-        while !sawOverflow && pulls < 80 do {
-            try Await.result(hs.receive(), 2.seconds)
-            catch {
-                case _: scalus.cardano.infra.ScalusBufferOverflowException => sawOverflow = true
-            }
-            pulls += 1
-        }
-        assert(sawOverflow, s"expected overflow within first 80 pulls, none seen")
+        // The single-threaded reader loop offers SDUs in wire-order. A marker on a different
+        // protocol, sent last, is delivered only after all 50 prior Handshake offers have run —
+        // so by the time we observe it the Handshake mailbox is in its post-overflow terminal
+        // state. Without this barrier the test races the reader: when `hs.receive()` runs
+        // concurrently with `offer()`, each incoming frame is hand-delivered to the pending
+        // waiter without ever entering the buffer, so capacity is never crossed.
+        peerSend(peer, MiniProtocolId.KeepAlive, bytes("flush"))
+        ka.receive().futureValue
+
+        // Buffer holds the first `capacity` frames; the next pull surfaces the overflow.
+        Await.result(hs.receive(), 2.seconds)
+        Await.result(hs.receive(), 2.seconds)
+        Await.result(hs.receive(), 2.seconds)
+        val ex = recoverToExceptionIf[scalus.cardano.infra.ScalusBufferOverflowException](
+          hs.receive()
+        ).futureValue
+        assert(ex ne null)
         // Root is NOT cancelled by the mux — state machines own escalation.
         assert(!root.token.isCancelled)
     }

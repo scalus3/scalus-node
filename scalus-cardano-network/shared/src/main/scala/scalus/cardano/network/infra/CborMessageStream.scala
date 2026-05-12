@@ -2,6 +2,7 @@ package scalus.cardano.network.infra
 
 import io.bullet.borer.{Borer, Cbor as Cborer, Decoder, Encoder}
 import scalus.cardano.infra.CancelToken
+import scalus.cardano.ledger.OriginalCborByteArray
 import scalus.serialization.cbor.Cbor
 import scalus.uplc.builtin.ByteString
 
@@ -51,7 +52,15 @@ final class CborMessageStream[M](
     protocol: MiniProtocolId,
     handle: MiniProtocolBytes,
     initialCapacity: Int = 512
-)(using encoder: Encoder[M], decoder: Decoder[M], ec: ExecutionContext) {
+)(using
+    encoder: Encoder[M],
+    // Decoder is resolved lazily per decode so message types whose decoders depend on the
+    // active CBOR buffer (`given OriginalCborByteArray` — see `KeepRaw[A]` and the LSQ
+    // `MsgResult` decoder) get the right buffer in scope. Callers with a context-free
+    // `Decoder[M]` are auto-lifted by the compiler.
+    decoderProvider: OriginalCborByteArray ?=> Decoder[M],
+    ec: ExecutionContext
+) {
 
     // Accumulator for bytes that arrived but haven't yet been decoded into a message. `storage` is
     // the backing array (grows geometrically on demand) and `size` is the logical length of
@@ -118,7 +127,12 @@ final class CborMessageStream[M](
         // stop after the first message instead of failing on leftover bytes — crucial when
         // multiple pipelined messages arrive in the same SDU.
         val view = java.util.Arrays.copyOfRange(storage, 0, size)
-        Cborer.decode(view).withPrefixOnly.to[M].valueAndInputEither match {
+        // Make the buffer available to message decoders that want to capture raw CBOR slices
+        // (LSQ `MsgResult`, anything wrapped in `KeepRaw[A]`) via the scalus
+        // `OriginalCborByteArray` pattern. Cheap when unused.
+        given OriginalCborByteArray = OriginalCborByteArray(view)
+        val decoder: Decoder[M] = decoderProvider
+        Cborer.decode(view).withPrefixOnly.to[M](using decoder).valueAndInputEither match {
             case Right((value, input)) =>
                 val cursorPos = input.cursor.toInt
                 val leftover = size - cursorPos
