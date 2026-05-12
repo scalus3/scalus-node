@@ -6,7 +6,7 @@ import scalus.cardano.network.{ChainApplier, ChainApplierHandle, ClientConfig, N
 import scalus.cardano.network.n2c.{N2cChainApplier, N2cChainApplierHandle, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig, UnsupportedSourceException}
+import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
 import scalus.cardano.node.stream.engine.persistence.{EnginePersistenceStore, FileEnginePersistenceStore}
@@ -288,6 +288,4 @@ object OxBlockchainStreamProvider {
             )
         case BackupSource.Custom(provider) => Some(provider)
         case BackupSource.NoBackup         => None
-        case BackupSource.LocalStateQuery(_) =>
-            throw UnsupportedSourceException("BackupSource.LocalStateQuery is not wired until M12")
 }

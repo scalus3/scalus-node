@@ -104,16 +104,15 @@ object BackupSource {
         maxConcurrentRequests: Int = 5
     ) extends BackupSource
 
-    /** LSQ-backed `BlockchainProviderTF` over an N2C local socket. Not wired until M11.
-      */
-    case class LocalStateQuery(socketPath: String) extends BackupSource
-
-    /** Submit-only backup over Node-to-Client `LocalTxSubmission` (M11.P3). JVM-only.
+    /** Full-feature backup over Node-to-Client: `LocalTxSubmission` for `submit` (since M11.P3),
+      * `LocalStateQuery` for `currentSlot` / `fetchLatestParams` / `findUtxos` (since M12).
+      * JVM-only.
       *
-      * Read methods (`findUtxos`, `fetchLatestParams`, `checkTransaction`) raise
-      * `UnsupportedOperationException` until `LocalStateQuery` lands in M12 — pair with a
-      * `BackupSource.Blockfrost` for read-side coverage in the meantime, or rely on the engine's
-      * own state.
+      * `fetchLatestParams` is Conway-only; `findUtxos` supports the single-source shapes
+      * `Simple(FromAddress(_))` and `Simple(FromInputs(_))` and returns
+      * [[UtxoQueryError.NotSupported]] for richer shapes — pair with `BackupSource.Blockfrost` when
+      * broader UtxoQuery support is needed. `checkTransaction` still raises until LocalTxMonitor
+      * lands (a separate mini-protocol).
       *
       * @param socketPath
       *   absolute filesystem path to the cardano-node `.socket`. Same shape as
