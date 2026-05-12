@@ -30,7 +30,9 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
   * [[UnsupportedOperationException]] (LocalTxMonitor is a separate mini-protocol, not LSQ);
   * `getDatum` returns `None` because LSQ has no datum-by-hash query.
   *
-  * The N2C handshake negotiates `query = true` so the server permits LSQ queries.
+  * The N2C handshake negotiates `query = false` — `query` in N2C version-data is a version-query
+  * probe flag, not an LSQ enablement. LSQ runs on any negotiated connection (the LSQ mini-protocol
+  * id 7 is unconditionally available once V16+ is accepted).
   *
   * Connection-sharing with `ChainSyncSource.N2C` (when both point at the same socket) is a planned
   * optimisation; today each component opens its own connection.
@@ -199,7 +201,13 @@ object LocalNodeProvider {
         cardanoInfo: CardanoInfo,
         submitEra: Int = 6
     )(using ExecutionContext): Future[LocalNodeProvider] = {
-        val config = ClientConfig.default.copy(query = true)
+        // `query=false` despite this provider being LSQ-backed: in N2C version-data the `query`
+        // flag does NOT enable LSQ — LSQ runs on any negotiated connection. It signals "this is a
+        // version-query probe" and makes the peer reply with `MsgQueryReply` (their full version
+        // table) instead of negotiating a connection. Setting `query=true` here breaks the
+        // handshake against a real cardano-node. The M12.P1.a comment about "permit LSQ queries"
+        // was incorrect — corrected after the yaci-devkit IT surfaced the issue.
+        val config = ClientConfig.default
         NodeToClientClient.connect(socketPath, networkMagic, config).map { conn =>
             val submitDriver = new LocalTxSubmissionDriver(
               conn.channel(MiniProtocolId.LocalTxSubmission),

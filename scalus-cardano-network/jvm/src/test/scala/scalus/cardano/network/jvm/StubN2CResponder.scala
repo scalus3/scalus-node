@@ -174,8 +174,11 @@ private object StubN2CWire {
 
         val reply: HandshakeMessage =
             if accept then
+                // Mirror real cardano-node behaviour: on a testnet (YaciDevnet here) the version
+                // is echoed back with bit 15 set. Driver strips this when populating
+                // NegotiatedVersion so consumers see the logical V16 number.
                 MsgAcceptVersion(
-                  NodeToClientVersion.V16,
+                  NodeToClientVersion.V16 | 0x8000,
                   NodeToClientVersionData(NetworkMagic.YaciDevnet, query = false)
                 )
             else MsgRefuse(refuseReason.getOrElse(RefuseReason.VersionMismatch(Nil)))

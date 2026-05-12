@@ -69,6 +69,10 @@ object HandshakeDriver {
     /** Default proposal: v16..v20 with the supplied magic and `query` flag. v15 and earlier are not
       * proposed — M11 declares Conway-era as the floor and the older shapes have a different
       * version-data layout we don't model.
+      *
+      * On the wire, Cardano N2C marks non-mainnet networks by OR-ing bit 15 (`0x8000`) into the
+      * version number. A `cardano-node` running on a testnet refuses unflagged versions with a
+      * `VersionMismatch` listing only flagged versions (e.g. `0x8010 = 32784` for V16 testnet).
       */
     private def defaultProposal(magic: NetworkMagic, query: Boolean): VersionTable = {
         val versions = Seq(
@@ -79,8 +83,15 @@ object HandshakeDriver {
           NodeToClientVersion.V20
         )
         val data = NodeToClientVersionData(magic, query)
-        VersionTable(versions.map(_ -> data)*)
+        val flagged = versions.map(v => withTestnetFlagIfNeeded(v, magic))
+        VersionTable(flagged.map(_ -> data)*)
     }
+
+    /** Bit 15 (`0x8000`) signals a non-mainnet network on the N2C wire. */
+    private val TestnetVersionFlag: Int = 0x8000
+
+    private def withTestnetFlagIfNeeded(version: Int, magic: NetworkMagic): Int =
+        if magic == NetworkMagic.Mainnet then version else version | TestnetVersionFlag
 
     private def interpret(
         proposed: VersionTable,
@@ -93,8 +104,9 @@ object HandshakeDriver {
               cause = null
             )
         case Some(MsgAcceptVersion(version, data)) =>
-            logger.info(s"n2c handshake accepted at v$version")
-            NegotiatedVersion(version, data)
+            val logical = version & ~TestnetVersionFlag
+            logger.info(s"n2c handshake accepted at v$logical")
+            NegotiatedVersion(logical, data)
         case Some(MsgRefuse(reason)) =>
             logger.warn(s"n2c handshake refused: $reason")
             reason match {

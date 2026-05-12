@@ -3,7 +3,7 @@ package scalus.cardano.network.n2c.localstatequery
 import io.bullet.borer.{Encoder, Writer}
 import io.bullet.borer.Cbor as Cborer
 import scalus.cardano.address.Address
-import scalus.cardano.ledger.{TaggedSortedSet, TransactionInput, TransactionOutput, Utxos}
+import scalus.cardano.ledger.{TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.network.chainsync.Point
 
 /** Typed `LocalStateQuery` queries (top-level / HFC-wrapped / per-era).
@@ -27,9 +27,8 @@ import scalus.cardano.network.chainsync.Point
   *                    /  [0] / [1] / ...        ; GetLedgerTip / GetEpochNo / ...
   * }}}
   *
-  * Result envelope: every `QueryIfCurrent` reply is wrapped in `[0, <result>]` (current era) or
-  * `[1, <eraMismatch>]` (the server is now in a different era than the client asked for). The
-  * peeling is centralised in [[LsqQuery.QueryIfCurrent]]; top-level queries like
+  * Result envelope: every `QueryIfCurrent` reply is wrapped in a single-element CBOR array
+  * `[<result>]`. The peeling is centralised in [[LsqQuery.QueryIfCurrent]]; top-level queries like
   * [[LsqQuery.GetChainPoint]] sit outside it.
   *
   * Each case provides its own encode/decode — keeps this module independent of any specific era's
@@ -68,14 +67,19 @@ object LsqQuery {
         def write(w: Writer): Writer = w.writeArrayHeader(1).writeInt(3)
         def decode(bytes: Array[Byte]): Point = Cborer.decode(bytes).to[Point].value
 
-    /** Common shape for any `QueryIfCurrent era q` query. Result bytes arrive wrapped in
-      * `[0, <inner>] / [1, <eraMismatch>]`; this trait peels the envelope and dispatches to
-      * `decodeInner` on success, throws [[LsqEraMismatchException]] on mismatch.
+    /** Common shape for any `QueryIfCurrent era q` query. Result bytes arrive wrapped in a
+      * single-element CBOR array `[<inner>]`; this trait peels the wrap and dispatches to
+      * `decodeInner` with the inner bytes.
       *
-      * The byte-level peel relies on canonical CBOR (definite-length array(2) header `0x82` and
-      * single-byte ints `0x00`/`0x01` for tags 0/1) — which is what `cardano-node` consensus emits
-      * for query responses. If the node ever switches to non-canonical encodings the peel would
-      * miscount; the assertions guard against silent corruption.
+      * The byte-level peel relies on canonical CBOR — a definite-length array(1) header is the
+      * single byte `0x81`. `cardano-node` consensus emits this shape verbatim; an empirical
+      * yaci-devkit capture confirmed it (the original `[0,<inner>] / [1,<eraMismatch>]` shape I
+      * lifted from older consensus docs is not what V16+ produces).
+      *
+      * Era-mismatch handling: in modern N2C, the era mismatch path is not exposed via this 1-elem
+      * wrap; cardano-node refuses incompatible-era queries earlier in the protocol (mini-protocol
+      * close or `MsgFailure` on acquire). If we ever see a wrap that isn't `0x81 <inner>`, we raise
+      * an IllegalArgumentException so the surprise surfaces loudly rather than corrupting.
       */
     sealed trait QueryIfCurrent[A] extends LsqQuery[A]:
         def era: Int
@@ -95,24 +99,12 @@ object LsqQuery {
         }
 
         final def decode(bytes: Array[Byte]): A = {
-            if bytes.length < 2 || bytes(0) != 0x82.toByte then
+            if bytes.length < 1 || bytes(0) != 0x81.toByte then
                 throw new IllegalArgumentException(
-                  "LSQ QueryIfCurrent envelope: expected CBOR array(2) header (0x82) at byte 0; " +
+                  "LSQ QueryIfCurrent envelope: expected CBOR array(1) header (0x81) at byte 0; " +
                       f"got 0x${bytes.headOption.map(_ & 0xff).getOrElse(0)}%02x"
                 )
-            bytes(1) match {
-                case 0x00 =>
-                    decodeInner(java.util.Arrays.copyOfRange(bytes, 2, bytes.length))
-                case 0x01 =>
-                    throw new LsqEraMismatchException(
-                      queriedEra = era,
-                      mismatchCbor = java.util.Arrays.copyOfRange(bytes, 2, bytes.length)
-                    )
-                case other =>
-                    throw new IllegalArgumentException(
-                      f"LSQ QueryIfCurrent envelope: tag must be 0 or 1, got 0x${other & 0xff}%02x"
-                    )
-            }
+            decodeInner(java.util.Arrays.copyOfRange(bytes, 1, bytes.length))
         }
 
     /** Per-era `GetCurrentPParams` — wraps as `QueryIfCurrent era (ShelleyQuery 3)`. The result
@@ -126,23 +118,21 @@ object LsqQuery {
         protected def decodeInner(bytes: Array[Byte]): A = decoder(bytes)
 
     /** `QueryIfCurrent era (GetUTxOByAddress addrs)` — UTxOs at any of the given addresses. The
-      * address set is wire-encoded with the Conway tag-258 set prefix (`cardano-node` accepts both
-      * bare-array and tagged forms but emits tagged on Conway+).
+      * address set is wire-encoded as a bare CBOR array (per `encodeFoldable` in consensus); NO
+      * tag-258 prefix — the Conway tag-258 set convention applies to serialized state/transactions,
+      * not to LSQ query parameters, which cardano-node refuses outright with
+      * `DeserialiseFailure "expected list len or indef"`.
       *
       * Result CBOR is the bare `Map[TransactionInput, TransactionOutput]` produced by
       * `cardano-ledger`'s `EncCBOR (UTxO era)`; borer auto-derives the Map decoder from the per-key
       * and per-value givens already in scope (`TransactionInput derives Codec`,
       * `given Decoder[TransactionOutput]`).
-      *
-      * Note: `TaggedSortedSet.writeTagged` is invoked directly rather than via
-      * `w.write(TaggedSortedSet.from(addresses))` because scalus does not currently provide an
-      * `Ordering[Address]`. Element order on the wire follows iteration order of the input `Set`.
       */
     final case class GetUTxOByAddress(era: Int, addresses: Set[Address])
         extends QueryIfCurrent[Utxos]:
         protected def writeShelleyQuery(w: Writer): Writer = {
             w.writeArrayHeader(2).writeInt(ShelleyQueryTag.GetUTxOByAddress)
-            TaggedSortedSet.writeTagged(w, addresses)
+            writeBareSet(w, addresses)
         }
         protected def decodeInner(bytes: Array[Byte]): Utxos = decodeUtxoMap(bytes)
 
@@ -153,21 +143,18 @@ object LsqQuery {
         extends QueryIfCurrent[Utxos]:
         protected def writeShelleyQuery(w: Writer): Writer = {
             w.writeArrayHeader(2).writeInt(ShelleyQueryTag.GetUTxOByTxIn)
-            TaggedSortedSet.writeTagged(w, inputs)
+            writeBareSet(w, inputs)
         }
         protected def decodeInner(bytes: Array[Byte]): Utxos = decodeUtxoMap(bytes)
+
+    private def writeBareSet[A: io.bullet.borer.Encoder](w: Writer, s: Iterable[A]): Writer = {
+        val seq = IndexedSeq.from(s)
+        w.writeArrayHeader(seq.size)
+        seq.foreach(w.write(_))
+        w
+    }
 
     /** Single shared encoder — every case dispatches through its own `write`. */
     given Encoder[LsqQuery[?]] with
         def write(w: Writer, q: LsqQuery[?]): Writer = q.write(w)
 }
-
-/** Raised when a `QueryIfCurrent` returns `[1, eraMismatch]` — the client asked the era is no
-  * longer current on the node side. Carries the queried era and the raw mismatch CBOR for
-  * diagnostics (decoding the mismatch payload itself is era-set-dependent and deferred).
-  */
-final class LsqEraMismatchException(val queriedEra: Int, val mismatchCbor: Array[Byte])
-    extends RuntimeException(
-      s"LSQ era mismatch: queried era=$queriedEra; node responded with eraMismatch payload " +
-          s"(${mismatchCbor.length} bytes)"
-    )

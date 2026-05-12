@@ -17,7 +17,11 @@ import scala.concurrent.ExecutionContext.Implicits.global
   * `YaciCardanoContainer` doesn't expose the node Unix socket through its Java API (it surfaces only
   * the N2N TCP port, Ogmios, and a couple of HTTP services), so this suite is env-gated — set
   * `SCALUS_N2C_SOCKET` to a Unix-socket path the test process can `connect()` on, optionally
-  * `SCALUS_N2C_NETWORK_MAGIC` (default 42 = yaci-devnet).
+  * `SCALUS_N2C_NETWORK_MAGIC` (default 42 = yaci-devnet) and `SCALUS_N2C_ERA` (default 6 = Conway).
+  *
+  * The `fetchLatestParams` test is Conway-only — `LocalNodeProvider` hardcodes the Conway PParams
+  * decoder — and skips when `SCALUS_N2C_ERA` is not 6 (e.g. yaci-devkit defaults to Babbage; that
+  * test will then skip while the rest of the suite still runs).
   *
   * Recommended local setup:
   * {{{
@@ -51,6 +55,9 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
             .map(NetworkMagic.apply)
             .getOrElse(NetworkMagic.YaciDevnet)
 
+    private def submitEra: Int =
+        sys.env.get("SCALUS_N2C_ERA").map(_.toInt).getOrElse(6)
+
     /** A bech32 testnet address used to exercise `findUtxos` against a live node. `lazy val`
       * because parsing happens only inside tests, after `assume(SCALUS_N2C_SOCKET)` has gated
       * suite construction.
@@ -61,7 +68,7 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
 
     private def withProvider(test: LocalNodeProvider => Unit): Unit = {
         val provider = LocalNodeProvider
-            .connect(socketPath, networkMagic, CardanoInfo.preview)
+            .connect(socketPath, networkMagic, CardanoInfo.preview, submitEra)
             .futureValue
         try test(provider)
         finally provider.close().futureValue
@@ -75,6 +82,7 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
     }
 
     test("fetchLatestParams returns sane Conway ProtocolParams") {
+        assume(submitEra == 6, s"SCALUS_N2C_ERA=$submitEra; this test is Conway-only")
         withProvider { p =>
             val pp = p.fetchLatestParams.futureValue
             // Sanity-check fields that must be non-zero in any reasonable Conway snapshot.
