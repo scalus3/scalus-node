@@ -187,7 +187,7 @@ final class LocalNodeProvider private (
       */
     override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =
         withTxMonitorSnapshot {
-            txMonitorDriver.hasTx(txHash).map { present =>
+            txMonitorDriver.hasTx(submitEra, txHash).map { present =>
                 if present then TransactionStatus.Pending else TransactionStatus.NotFound
             }
         }

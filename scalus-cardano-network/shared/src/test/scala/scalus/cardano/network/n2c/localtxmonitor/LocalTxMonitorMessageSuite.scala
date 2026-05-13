@@ -26,7 +26,7 @@ class LocalTxMonitorMessageSuite extends AnyFunSuite {
     test("round-trip MsgAcquire") { roundTrip(MsgAcquire) }
     test("round-trip MsgAcquired(slot)") { roundTrip(MsgAcquired(slot = 12345L)) }
     test("round-trip MsgRelease") { roundTrip(MsgRelease) }
-    test("round-trip MsgHasTx") { roundTrip(MsgHasTx(sampleTxHash)) }
+    test("round-trip MsgHasTx") { roundTrip(MsgHasTx(era = 6, sampleTxHash)) }
     test("round-trip MsgRespondHasTx(true)") { roundTrip(MsgRespondHasTx(true)) }
     test("round-trip MsgRespondHasTx(false)") { roundTrip(MsgRespondHasTx(false)) }
 
@@ -46,13 +46,14 @@ class LocalTxMonitorMessageSuite extends AnyFunSuite {
         assert(encHex(MsgAcquired(10L)) == "82020a")
     }
 
-    test("golden: MsgHasTx — [7, bytes(32)]") {
+    test("golden: MsgHasTx — [7, [era, bytes(32)]]") {
         // 82  array(2)
         //   07  uint 7
-        //   58 20 <32 bytes>  ─ byte string len 32
-        val hex = encHex(MsgHasTx(sampleTxHash))
-        assert(hex.startsWith("82075820"))
-        assert(hex == "8207582" + "0" + "ab" * 32)
+        //   82  array(2) — HFC envelope
+        //     06  uint 6 (era = Conway)
+        //     58 20 <32 bytes>  ─ byte string len 32
+        val hex = encHex(MsgHasTx(era = 6, sampleTxHash))
+        assert(hex == "820782065820" + "ab" * 32, s"actual=$hex")
     }
 
     test("golden: MsgRespondHasTx — [8, bool]") {

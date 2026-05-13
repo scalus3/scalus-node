@@ -83,14 +83,14 @@ final class LocalTxMonitorDriver(
     /** Ask whether `txHash` is present in the held snapshot. Caller must have completed an
       * [[acquire]] before calling.
       */
-    def hasTx(txHash: TransactionHash): Future[Boolean] = {
+    def hasTx(era: Int, txHash: TransactionHash): Future[Boolean] = {
         if closed then return Future.failed(new IllegalStateException("driver closed"))
         if !acquired then
             return Future.failed(
               new IllegalStateException("no snapshot acquired; call acquire() first")
             )
         stream
-            .send(MsgHasTx(txHash), cancelToken)
+            .send(MsgHasTx(era, txHash), cancelToken)
             .flatMap(_ => stream.receive(cancelToken))
             .flatMap {
                 case Some(MsgRespondHasTx(b)) => Future.successful(b)

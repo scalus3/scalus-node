@@ -14,7 +14,7 @@ import scalus.cardano.ledger.{SlotNo, TransactionHash}
   *     / msgRelease        ; [3]
   *     / msgNextTx         ; [5]                ; deferred
   *     / msgRespondNextTx  ; [6] / [6, tx]      ; deferred
-  *     / msgHasTx          ; [7, txId]
+  *     / msgHasTx          ; [7, [era, txIdBytes]]     ; HFC-wrapped GenTxId
   *     / msgRespondHasTx   ; [8, bool]
   *     / msgGetSizes       ; [9]                ; deferred
   *     / msgRespondGetSizes; [10, sizes]        ; deferred
@@ -22,6 +22,10 @@ import scalus.cardano.ledger.{SlotNo, TransactionHash}
   *   slotNo = uint
   *   txId   = bytes .size 32
   * }}}
+  *
+  * `txId` is the cardano-block `GenTxId` and on the wire is wrapped by the HardForkCombinator into
+  * `[eraIdx, eraGenTxId]` — same era-discriminated envelope as `MsgSubmitTx`'s transaction (without
+  * the tag-24 EmbeddedCBOR wrap; the txId bytes are just the 32-byte hash, not nested CBOR).
   *
   * Minimal surface for [[scalus.cardano.network.n2c.LocalNodeProvider#checkTransaction]]: acquire a
   * mempool snapshot, ask `HasTx`, release. `NextTx` and `GetSizes` aren't modelled today; the
@@ -43,8 +47,13 @@ object LocalTxMonitorMessage {
     /** Initiator → responder: drop the current snapshot; client returns to Idle. */
     case object MsgRelease extends LocalTxMonitorMessage
 
-    /** Initiator → responder: is the transaction with this hash present in the held snapshot? */
-    final case class MsgHasTx(txHash: TransactionHash) extends LocalTxMonitorMessage
+    /** Initiator → responder: is the transaction with this hash present in the held snapshot?
+      *
+      * `era` is the HardForkCombinator era index for the embedded txId (Babbage=5, Conway=6, …).
+      * The wire shape is `[7, [era, bytes(32)]]` — the era wrap is required by the consensus HFC
+      * `GenTxId` encoder, even though the txId payload itself is era-agnostic raw bytes.
+      */
+    final case class MsgHasTx(era: Int, txHash: TransactionHash) extends LocalTxMonitorMessage
 
     /** Responder → initiator: yes / no. */
     final case class MsgRespondHasTx(present: Boolean) extends LocalTxMonitorMessage
@@ -60,8 +69,9 @@ object LocalTxMonitorMessage {
             case MsgAcquire        => w.writeArrayHeader(1).writeInt(1)
             case MsgAcquired(slot) => w.writeArrayHeader(2).writeInt(2).writeLong(slot)
             case MsgRelease        => w.writeArrayHeader(1).writeInt(3)
-            case MsgHasTx(txHash) =>
+            case MsgHasTx(era, txHash) =>
                 w.writeArrayHeader(2).writeInt(7)
+                w.writeArrayHeader(2).writeInt(era)
                 w.writeBytes(txHash.bytes)
             case MsgRespondHasTx(b) =>
                 w.writeArrayHeader(2).writeInt(8).writeBoolean(b)
@@ -76,7 +86,13 @@ object LocalTxMonitorMessage {
                 case 2 if arrLen == 2 => MsgAcquired(r.readLong())
                 case 3 if arrLen == 1 => MsgRelease
                 case 7 if arrLen == 2 =>
-                    MsgHasTx(TransactionHash.fromArray(r.readBytes[Array[Byte]]()))
+                    val innerLen = r.readArrayHeader().toInt
+                    if innerLen != 2 then
+                        r.validationFailure(
+                          s"MsgHasTx HFC inner arrLen=$innerLen (expected 2)"
+                        )
+                    val era = r.readInt()
+                    MsgHasTx(era, TransactionHash.fromArray(r.readBytes[Array[Byte]]()))
                 case 8 if arrLen == 2 => MsgRespondHasTx(r.readBoolean())
                 case other =>
                     r.validationFailure(
