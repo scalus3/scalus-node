@@ -11,7 +11,8 @@ import scalus.cardano.ledger.{SlotNo, TransactionHash}
   *     = msgDone           ; [0]
   *     / msgAcquire        ; [1]
   *     / msgAcquired       ; [2, slotNo]
-  *     / msgRelease        ; [3]
+  *     / msgAwaitAcquire   ; [3]                ; server may send while still computing snapshot
+  *     / msgRelease        ; [4]
   *     / msgNextTx         ; [5]                ; deferred
   *     / msgRespondNextTx  ; [6] / [6, tx]      ; deferred
   *     / msgHasTx          ; [7, [era, txIdBytes]]     ; HFC-wrapped GenTxId
@@ -44,6 +45,11 @@ object LocalTxMonitorMessage {
     /** Responder → initiator: snapshot acquired at the given slot. */
     final case class MsgAcquired(slot: SlotNo) extends LocalTxMonitorMessage
 
+    /** Responder → initiator: snapshot not yet available; the server is still computing one. The
+      * initiator is expected to keep receiving until a [[MsgAcquired]] lands.
+      */
+    case object MsgAwaitAcquire extends LocalTxMonitorMessage
+
     /** Initiator → responder: drop the current snapshot; client returns to Idle. */
     case object MsgRelease extends LocalTxMonitorMessage
 
@@ -68,7 +74,8 @@ object LocalTxMonitorMessage {
             case MsgDone           => w.writeArrayHeader(1).writeInt(0)
             case MsgAcquire        => w.writeArrayHeader(1).writeInt(1)
             case MsgAcquired(slot) => w.writeArrayHeader(2).writeInt(2).writeLong(slot)
-            case MsgRelease        => w.writeArrayHeader(1).writeInt(3)
+            case MsgAwaitAcquire   => w.writeArrayHeader(1).writeInt(3)
+            case MsgRelease        => w.writeArrayHeader(1).writeInt(4)
             case MsgHasTx(era, txHash) =>
                 w.writeArrayHeader(2).writeInt(7)
                 w.writeArrayHeader(2).writeInt(era)
@@ -84,7 +91,8 @@ object LocalTxMonitorMessage {
                 case 0 if arrLen == 1 => MsgDone
                 case 1 if arrLen == 1 => MsgAcquire
                 case 2 if arrLen == 2 => MsgAcquired(r.readLong())
-                case 3 if arrLen == 1 => MsgRelease
+                case 3 if arrLen == 1 => MsgAwaitAcquire
+                case 4 if arrLen == 1 => MsgRelease
                 case 7 if arrLen == 2 =>
                     val innerLen = r.readArrayHeader().toInt
                     if innerLen != 2 then

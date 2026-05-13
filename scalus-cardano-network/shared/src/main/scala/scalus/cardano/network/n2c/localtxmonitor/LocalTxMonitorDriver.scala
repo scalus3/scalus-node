@@ -12,12 +12,13 @@ import scala.concurrent.{ExecutionContext, Future}
   * State machine (CDDL `local-tx-monitor.cddl`, minimal surface):
   *
   * {{{
-  *   Idle     ──MsgAcquire────────→ Acquiring
-  *            Acquiring ──MsgAcquired(slot)──→ Acquired
-  *   Acquired ──MsgHasTx(h)───────→ Querying
-  *            Querying  ──MsgRespondHasTx(b)──→ Acquired
-  *   Acquired ──MsgRelease────────→ Idle
-  *   Idle     ──MsgDone───────────→ Done
+  *   Idle      ──MsgAcquire────────→ Acquiring
+  *             Acquiring ──MsgAwaitAcquire──→ Acquiring   (server still computing snapshot)
+  *             Acquiring ──MsgAcquired(slot)──→ Acquired
+  *   Acquired  ──MsgHasTx(h)───────→ Querying
+  *             Querying  ──MsgRespondHasTx(b)──→ Acquired
+  *   Acquired  ──MsgRelease────────→ Idle
+  *   Idle      ──MsgDone───────────→ Done
   * }}}
   *
   * Only `acquire / hasTx / release / close` are exposed today — enough to back
@@ -66,19 +67,23 @@ final class LocalTxMonitorDriver(
             )
         stream
             .send(MsgAcquire, cancelToken)
-            .flatMap(_ => stream.receive(cancelToken))
-            .flatMap {
-                case Some(MsgAcquired(slot)) =>
-                    acquired = true
-                    Future.successful(slot)
-                case Some(other) =>
-                    Future.failed(unexpectedMessage("awaiting Acquired", other))
-                case None =>
-                    Future.failed(
-                      new IllegalStateException("peer closed LocalTxMonitor mid-acquire")
-                    )
-            }
+            .flatMap(_ => awaitAcquired())
     }
+
+    /** Pull messages until `MsgAcquired` lands. The server may interleave one or more
+      * `MsgAwaitAcquire` frames while it is still computing a snapshot; per the CDDL state machine
+      * those are non-terminal and the client stays in `Acquiring`.
+      */
+    private def awaitAcquired(): Future[SlotNo] =
+        stream.receive(cancelToken).flatMap {
+            case Some(MsgAcquired(slot)) =>
+                acquired = true
+                Future.successful(slot)
+            case Some(MsgAwaitAcquire) => awaitAcquired()
+            case Some(other) => Future.failed(unexpectedMessage("awaiting Acquired", other))
+            case None =>
+                Future.failed(new IllegalStateException("peer closed LocalTxMonitor mid-acquire"))
+        }
 
     /** Ask whether `txHash` is present in the held snapshot. Caller must have completed an
       * [[acquire]] before calling.

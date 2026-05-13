@@ -25,6 +25,7 @@ class LocalTxMonitorMessageSuite extends AnyFunSuite {
     test("round-trip MsgDone") { roundTrip(MsgDone) }
     test("round-trip MsgAcquire") { roundTrip(MsgAcquire) }
     test("round-trip MsgAcquired(slot)") { roundTrip(MsgAcquired(slot = 12345L)) }
+    test("round-trip MsgAwaitAcquire") { roundTrip(MsgAwaitAcquire) }
     test("round-trip MsgRelease") { roundTrip(MsgRelease) }
     test("round-trip MsgHasTx") { roundTrip(MsgHasTx(era = 6, sampleTxHash)) }
     test("round-trip MsgRespondHasTx(true)") { roundTrip(MsgRespondHasTx(true)) }
@@ -36,7 +37,8 @@ class LocalTxMonitorMessageSuite extends AnyFunSuite {
         // 81 NN  = array(1) [N]
         assert(encHex(MsgDone) == "8100")
         assert(encHex(MsgAcquire) == "8101")
-        assert(encHex(MsgRelease) == "8103")
+        assert(encHex(MsgAwaitAcquire) == "8103")
+        assert(encHex(MsgRelease) == "8104")
     }
 
     test("golden: MsgAcquired(slot=10) — [2, 10]") {

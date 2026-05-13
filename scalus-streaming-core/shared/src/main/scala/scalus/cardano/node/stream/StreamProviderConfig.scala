@@ -105,14 +105,16 @@ object BackupSource {
     ) extends BackupSource
 
     /** Full-feature backup over Node-to-Client: `LocalTxSubmission` for `submit` (since M11.P3),
-      * `LocalStateQuery` for `currentSlot` / `fetchLatestParams` / `findUtxos` (since M12).
-      * JVM-only.
+      * `LocalStateQuery` for `currentSlot` / `fetchLatestParams` / `findUtxos` (since M12.P1–P3),
+      * `LocalTxMonitor` for `checkTransaction` (since M12.P4). JVM-only.
       *
       * `fetchLatestParams` is Conway-only; `findUtxos` supports the single-source shapes
       * `Simple(FromAddress(_))` and `Simple(FromInputs(_))` and returns
       * [[UtxoQueryError.NotSupported]] for richer shapes — pair with `BackupSource.Blockfrost` when
-      * broader UtxoQuery support is needed. `checkTransaction` still raises until LocalTxMonitor
-      * lands (a separate mini-protocol).
+      * broader UtxoQuery support is needed. `checkTransaction` returns `Pending` when the tx is in
+      * the local mempool snapshot and `NotFound` otherwise; the `Confirmed` answer for on-chain
+      * transactions comes from the engine's own `TxHashIndex` ahead of falling through to this
+      * backup (see `BaseStreamProvider.checkTransaction`).
       *
       * @param socketPath
       *   absolute filesystem path to the cardano-node `.socket`. Same shape as
