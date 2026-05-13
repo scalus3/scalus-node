@@ -3,7 +3,7 @@ package scalus.cardano.network.n2c
 import io.bullet.borer.Cbor
 import scalus.cardano.ledger.{CardanoInfo, ConwayProtocolParams, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
 import scalus.cardano.node.{NodeSubmitError, SubmitError, UtxoQuery, UtxoQueryError, UtxoSource}
-import scalus.cardano.node.stream.{BackupDiagnosticsSnapshot, LocalNodeBackend}
+import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot, LocalNodeBackend}
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.chainsync.Point
 import scalus.cardano.network.infra.MiniProtocolId
@@ -58,7 +58,8 @@ final class LocalNodeAccess private (
     submitEra: Int,
     connectedSinceMillis: Long
 )(using val executionContext: ExecutionContext)
-    extends LocalNodeBackend {
+    extends LocalNodeBackend
+    with BackupDiagnostics {
 
     private val diagState = new AtomicReference[BackupDiagnosticsSnapshot](
       BackupDiagnosticsSnapshot(

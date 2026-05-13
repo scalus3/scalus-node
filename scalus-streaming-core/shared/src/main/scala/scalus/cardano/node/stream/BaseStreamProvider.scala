@@ -1,7 +1,7 @@
 package scalus.cardano.node.stream
 
 import scalus.cardano.ledger.{Block, CardanoInfo, DataHash, ProtocolParams, Transaction, TransactionHash, TransactionInput, TransactionOutput, Utxos}
-import scalus.cardano.node.{BlockchainProvider, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
+import scalus.cardano.node.{BlockchainProvider, BlockchainReader, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.uplc.builtin.Data
 import scalus.cardano.node.stream.engine.{Engine, Mailbox}
 
@@ -58,7 +58,7 @@ abstract class BaseStreamProvider[F[_], C[_]](
     final def backupDiagnostics: Option[BackupDiagnosticsSnapshot] =
         engine.backup
             .collect { case d: BackupDiagnostics => d.diagnostics }
-            .orElse(engine.localNode.map(_.diagnostics))
+            .orElse(engine.localNode.collect { case d: BackupDiagnostics => d.diagnostics })
 
     // ------------------------------------------------------------------
     // Stream subscriptions
@@ -144,17 +144,38 @@ abstract class BaseStreamProvider[F[_], C[_]](
     // Snapshot (one-shot) methods. Engine first; backup on fall-through.
     // ------------------------------------------------------------------
 
+    /** Dispatch a read across the two backup slots: `engine.backup` first, then `engine.localNode`,
+      * else `default`. Mutually exclusive in practice today (one per `BackupSource` variant), but
+      * the helper does not assume that.
+      */
+    private def dispatchBackup[A](
+        fromFull: BlockchainReader => Future[A],
+        fromLocal: LocalNodeBackend => Future[A],
+        default: => Future[A]
+    ): Future[A] = engine.backup match
+        case Some(bp) => fromFull(bp)
+        case None =>
+            engine.localNode match
+                case Some(ln) => fromLocal(ln)
+                case None     => default
+
+    /** Threads the engine-side `notifySubmit` through a submit-call's result. */
+    private def notifyOnSubmit(
+        result: Future[Either[SubmitError, TransactionHash]]
+    ): Future[Either[SubmitError, TransactionHash]] = result.flatMap {
+        case r @ Right(hash) => engine.notifySubmit(hash).map(_ => r)
+        case l @ Left(_)     => Future.successful(l)
+    }
+
     final def currentSlot: F[scalus.cardano.ledger.SlotNo] = liftFuture {
         engine.currentTip match
             case Some(t) => Future.successful(t.slot)
             case None =>
-                engine.backup match
-                    case Some(bp) => bp.currentSlot
-                    case None =>
-                        engine.localNode match
-                            case Some(ln) => ln.currentSlot
-                            case None =>
-                                Future.failed(Engine.NoBackupConfiguredException("currentSlot"))
+                dispatchBackup(
+                  _.currentSlot,
+                  _.currentSlot,
+                  Future.failed(Engine.NoBackupConfiguredException("currentSlot"))
+                )
     }
 
     final def fetchLatestParams: F[ProtocolParams] = liftFuture {
@@ -165,15 +186,11 @@ abstract class BaseStreamProvider[F[_], C[_]](
         engine.findUtxosLocal(query).flatMap {
             case Some(utxos) => Future.successful(Right(utxos))
             case None =>
-                engine.backup match
-                    case Some(bp) => bp.findUtxos(query)
-                    case None =>
-                        engine.localNode match
-                            case Some(ln) => ln.findUtxos(query)
-                            case None =>
-                                Future.successful(
-                                  Left(UtxoQueryError.NotFound(noBackupSource(query)))
-                                )
+                dispatchBackup(
+                  _.findUtxos(query),
+                  _.findUtxos(query),
+                  Future.successful(Left(UtxoQueryError.NotFound(noBackupSource(query))))
+                )
         }
     }
 
@@ -181,13 +198,11 @@ abstract class BaseStreamProvider[F[_], C[_]](
         engine.lookupDatum(datumHash).flatMap {
             case some @ Some(_) => Future.successful(some)
             case None =>
-                engine.backup match {
-                    case Some(bp) => bp.getDatum(datumHash)
-                    case None =>
-                        engine.localNode match
-                            case Some(ln) => ln.getDatum(datumHash)
-                            case None     => Future.successful(None)
-                }
+                dispatchBackup(
+                  _.getDatum(datumHash),
+                  _.getDatum(datumHash),
+                  Future.successful(None)
+                )
         }
     }
 
@@ -195,35 +210,24 @@ abstract class BaseStreamProvider[F[_], C[_]](
         engine.txStatus(txHash).flatMap {
             case Some(status) => Future.successful(status)
             case None =>
-                engine.backup match
-                    case Some(bp) => bp.checkTransaction(txHash)
-                    case None =>
-                        engine.localNode match
-                            case Some(ln) =>
-                                ln.checkInMempool(txHash).map {
-                                    if _ then TransactionStatus.Pending
-                                    else TransactionStatus.NotFound
-                                }
-                            case None => Future.successful(TransactionStatus.NotFound)
+                dispatchBackup(
+                  _.checkTransaction(txHash),
+                  _.checkInMempool(txHash).map {
+                      if _ then TransactionStatus.Pending else TransactionStatus.NotFound
+                  },
+                  Future.successful(TransactionStatus.NotFound)
+                )
         }
     }
 
     def submit(transaction: Transaction): F[Either[SubmitError, TransactionHash]] =
         liftFuture {
             engine.backup match
-                case Some(bp: BlockchainProvider) =>
-                    bp.submit(transaction).flatMap {
-                        case r @ Right(hash) => engine.notifySubmit(hash).map(_ => r)
-                        case l @ Left(_)     => Future.successful(l)
-                    }
+                case Some(bp: BlockchainProvider) => notifyOnSubmit(bp.submit(transaction))
                 case _ =>
                     engine.localNode match
-                        case Some(ln) =>
-                            ln.submit(transaction).flatMap {
-                                case r @ Right(hash) => engine.notifySubmit(hash).map(_ => r)
-                                case l @ Left(_)     => Future.successful(l)
-                            }
-                        case None => Future.successful(Left(noBackupSubmitError))
+                        case Some(ln) => notifyOnSubmit(ln.submit(transaction))
+                        case None     => Future.successful(Left(noBackupSubmitError))
         }
 
     final def pollForConfirmation(
