@@ -58,10 +58,29 @@ class LsqQuerySuite extends AnyFunSuite {
         assert(decoded.sameElements(inner))
     }
 
-    test("QueryIfCurrent envelope rejects non-array(1) header") {
+    test("QueryIfCurrent envelope rejects unknown leading byte") {
         val q = LsqQuery.GetCurrentPParams[Unit](era = 6, decoder = _ => ())
-        val bad = Array[Byte](0x82.toByte, 0x00, 0x00) // array(2), not array(1)
+        val bad = Array[Byte](0x83.toByte) // array(3) — neither OK(0x81) nor mismatch(0x82)
         intercept[IllegalArgumentException](q.decode(bad))
+    }
+
+    test("QueryIfCurrent envelope: array(2) parses as LsqEraMismatchException") {
+        val q = LsqQuery.GetCurrentPParams[Unit](era = 6, decoder = _ => ())
+        // [[6, "Conway"], [5, "Babbage"]] — observed shape from yaci-devkit when queried at
+        // an era the node isn't currently in.
+        val envelope: Array[Byte] = Array(
+          0x82.toByte, // array(2) outer (EraMismatch)
+          0x82.toByte,
+          0x06.toByte,
+          0x66.toByte // EraInfo(6, "Conway")
+        ) ++ "Conway".getBytes("US-ASCII") ++ Array(
+          0x82.toByte,
+          0x05.toByte,
+          0x67.toByte // EraInfo(5, "Babbage")
+        ) ++ "Babbage".getBytes("US-ASCII")
+        val ex = intercept[LsqEraMismatchException](q.decode(envelope))
+        assert(ex.expected == EraInfo(6, "Conway"))
+        assert(ex.actual == EraInfo(5, "Babbage"))
     }
 
     test("GetCurrentPParams.decode delegates to injected decoder after envelope peel") {

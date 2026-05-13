@@ -8,6 +8,7 @@ import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.chainsync.Point
 import scalus.cardano.network.infra.MiniProtocolId
 import scalus.cardano.network.n2c.localstatequery.{LocalStateQueryDriver, LocalStateQueryMessage, LsqQuery}
+import scalus.cardano.network.n2c.localtxmonitor.LocalTxMonitorDriver
 import scalus.cardano.network.n2c.localtxsubmission.{LocalTxSubmissionDriver, LocalTxSubmissionRejection}
 import scalus.uplc.builtin.{ByteString, Data}
 import scalus.utils.Hex.toHex
@@ -20,15 +21,15 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
   *
   * Owns its own [[NodeToClientConnection]] plus three mini-protocol drivers:
   *   - [[LocalTxSubmissionDriver]] on [[MiniProtocolId.LocalTxSubmission]] for `submit`
-  *   - [[LocalStateQueryDriver]] on [[MiniProtocolId.LocalStateQuery]] for `currentSlot` and
-  *     (eventually) the rest of the read surface
-  *   - [[LocalTxSubmissionDriver]]'s connection-root for KeepAlive
+  *   - [[LocalStateQueryDriver]] on [[MiniProtocolId.LocalStateQuery]] for `currentSlot` /
+  *     `fetchLatestParams` / `findUtxos`
+  *   - [[LocalTxMonitorDriver]] on [[MiniProtocolId.LocalTxMonitor]] for `checkTransaction`
   *
-  * Read methods backed by LSQ today: `currentSlot`, `fetchLatestParams` (Conway-only), `findUtxos`
-  * (trivial single-source `FromAddress` / `FromInputs` queries — anything richer returns
-  * [[UtxoQueryError.NotSupported]]). `checkTransaction` still raises
-  * [[UnsupportedOperationException]] (LocalTxMonitor is a separate mini-protocol, not LSQ);
-  * `getDatum` returns `None` because LSQ has no datum-by-hash query.
+  * Reads backed today: `currentSlot`, `fetchLatestParams` (Conway-only), `findUtxos` (trivial
+  * single-source `FromAddress` / `FromInputs` queries — richer shapes return
+  * [[UtxoQueryError.NotSupported]]), `checkTransaction` (mempool snapshot → `Pending` if present,
+  * `NotFound` otherwise; on-chain confirmation requires upstream chain history that this provider
+  * does not see). `getDatum` returns `None` because LSQ has no datum-by-hash query.
   *
   * The N2C handshake negotiates `query = false` — `query` in N2C version-data is a version-query
   * probe flag, not an LSQ enablement. LSQ runs on any negotiated connection (the LSQ mini-protocol
@@ -47,6 +48,7 @@ final class LocalNodeProvider private (
     conn: NodeToClientConnection,
     driver: LocalTxSubmissionDriver,
     lsqDriver: LocalStateQueryDriver,
+    txMonitorDriver: LocalTxMonitorDriver,
     val cardanoInfo: CardanoInfo,
     submitEra: Int,
     connectedSinceMillis: Long
@@ -98,7 +100,11 @@ final class LocalNodeProvider private (
 
     /** Tear down all drivers + connection. Idempotent. */
     def close(): Future[Unit] =
-        lsqDriver.close().flatMap(_ => driver.close()).flatMap(_ => conn.close())
+        txMonitorDriver
+            .close()
+            .flatMap(_ => lsqDriver.close())
+            .flatMap(_ => driver.close())
+            .flatMap(_ => conn.close())
 
     // -------- LSQ-backed reads --------
 
@@ -172,18 +178,40 @@ final class LocalNodeProvider private (
         }
     }
 
-    // -------- Reads still deferred (per-query result CBOR decoders TBD) --------
+    // -------- LocalTxMonitor-backed reads --------
 
-    private def unsupportedRead(name: String): Nothing =
-        throw new UnsupportedOperationException(
-          s"$name is not yet implemented by BackupSource.LocalNode — pair with " +
-              "BackupSource.Blockfrost, or wait for the per-query LSQ result decoder"
-        )
+    /** Mempool-presence answer: `Pending` if the tx is in the held mempool snapshot, `NotFound`
+      * otherwise. We do not observe chain history here; a `Confirmed` answer would require the
+      * upstream engine to consult its rollback buffer or chainstore. Callers that need `Confirmed`
+      * should layer on top.
+      */
+    override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =
+        withTxMonitorSnapshot {
+            txMonitorDriver.hasTx(submitEra, txHash).map { present =>
+                if present then TransactionStatus.Pending else TransactionStatus.NotFound
+            }
+        }
+
+    private val txMonitorGate = new AtomicReference[Future[Unit]](Future.unit)
+
+    private def withTxMonitorSnapshot[A](body: => Future[A]): Future[A] = {
+        val nextGate = Promise[Unit]()
+        val prev = txMonitorGate.getAndSet(nextGate.future)
+        prev
+            .transformWith(_ => txMonitorDriver.acquire())
+            .flatMap { _ =>
+                body.transformWith { result =>
+                    txMonitorDriver
+                        .release()
+                        .recover { case _ => () }
+                        .flatMap(_ => Future.fromTry(result))
+                }
+            }
+            .andThen { case _ => nextGate.success(()) }
+    }
 
     override def getDatum(datumHash: scalus.cardano.ledger.DataHash): Future[Option[Data]] =
         Future.successful(None)
-    override def checkTransaction(txHash: TransactionHash): Future[TransactionStatus] =
-        unsupportedRead("checkTransaction")
 }
 
 object LocalNodeProvider {
@@ -217,10 +245,15 @@ object LocalNodeProvider {
               conn.channel(MiniProtocolId.LocalStateQuery),
               conn.rootToken
             )
+            val txMonitorDriver = new LocalTxMonitorDriver(
+              conn.channel(MiniProtocolId.LocalTxMonitor),
+              conn.rootToken
+            )
             new LocalNodeProvider(
               conn,
               submitDriver,
               lsqDriver,
+              txMonitorDriver,
               cardanoInfo,
               submitEra,
               connectedSinceMillis = System.currentTimeMillis()

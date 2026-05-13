@@ -5,6 +5,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Address
 import scalus.cardano.ledger.{CardanoInfo, TransactionHash, TransactionInput}
+import scalus.cardano.node.TransactionStatus
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.n2c.LocalNodeProvider
 import scalus.cardano.node.{UtxoQuery, UtxoQueryError, UtxoSource}
@@ -137,6 +138,16 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
             )
             val result = p.getDatum(datumHash).futureValue
             assert(result.isEmpty)
+        }
+    }
+
+    test("checkTransaction for an unknown hash returns NotFound via LocalTxMonitor") {
+        withProvider { p =>
+            val unknown = TransactionHash.fromByteString(
+              ByteString.fromArray(Array.fill[Byte](32)(0x55))
+            )
+            val status = p.checkTransaction(unknown).futureValue
+            assert(status == TransactionStatus.NotFound, s"expected NotFound, got $status")
         }
     }
 }
