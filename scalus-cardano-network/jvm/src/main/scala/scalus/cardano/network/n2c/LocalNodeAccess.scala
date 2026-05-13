@@ -7,7 +7,7 @@ import scalus.cardano.node.stream.{BackupDiagnostics, BackupDiagnosticsSnapshot,
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.chainsync.Point
 import scalus.cardano.network.infra.MiniProtocolId
-import scalus.cardano.network.n2c.localstatequery.{LocalStateQueryDriver, LocalStateQueryMessage, LsqQuery}
+import scalus.cardano.network.n2c.localstatequery.{LocalStateQueryDriver, LocalStateQueryMessage, LsqError, LsqQuery}
 import scalus.cardano.network.n2c.localtxmonitor.LocalTxMonitorDriver
 import scalus.cardano.network.n2c.localtxsubmission.{LocalTxSubmissionDriver, LocalTxSubmissionRejection}
 import scalus.uplc.builtin.{ByteString, Data}
@@ -114,48 +114,63 @@ final class LocalNodeAccess private (
 
     // -------- LSQ-backed reads --------
 
-    def currentSlot: Future[SlotNo] = withLsqSnapshot {
-        lsqDriver.query(LsqQuery.GetChainPoint).map {
-            case Point.Origin              => 0L
-            case Point.BlockPoint(slot, _) => slot
-        }
+    def currentSlot: Future[SlotNo] = runLsq(LsqQuery.GetChainPoint).map {
+        case Point.Origin              => 0L
+        case Point.BlockPoint(slot, _) => slot
     }
 
-    def fetchLatestParams: Future[ProtocolParams] = withLsqSnapshot {
-        lsqDriver.query(
-          LsqQuery.GetCurrentPParams(
-            era = submitEra,
-            decoder = bytes => ConwayProtocolParams.fromCbor(bytes).toProtocolParams
-          )
-        )
-    }
+    def fetchLatestParams: Future[ProtocolParams] = runLsq(
+      LsqQuery.GetCurrentPParams(
+        era = submitEra,
+        decoder = bytes => ConwayProtocolParams.fromCbor(bytes).toProtocolParams
+      )
+    )
 
     /** Only single-source `FromAddress(addr)` and `FromInputs(inputs)` map cleanly onto LSQ; the
       * filter / limit / offset / minTotal facets of [[UtxoQuery.Simple]] and the `Or`/`And` source
       * combinators have no LSQ representation. Callers wanting richer queries should pair with a
       * `BackupSource.Blockfrost`; here we surface them as [[UtxoQueryError.NotSupported]] rather
       * than fetching everything and filtering client-side.
+      *
+      * `LsqError` from the underlying LSQ driver always maps to `UtxoQueryError.NotSupported`
+      * (`reason` carries the typed `LsqError` rendering) — the stream stack treats `NotSupported`
+      * as the "this backup can't answer, try another" signal.
       */
-    def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] = query match {
-        case UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
-            runUtxoLsq(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
-        case UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
-            runUtxoLsq(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
-        case other =>
-            Future.successful(
-              Left(
-                UtxoQueryError.NotSupported(
-                  query = other,
-                  reason = "LocalNodeAccess supports only Simple(FromAddress) / " +
-                      "Simple(FromInputs) without filter/limit/offset/minTotal; " +
-                      "pair with BackupSource.Blockfrost for richer queries"
+    def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] = {
+        val lsq: Option[LsqQuery[Utxos]] = query match {
+            case UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
+                Some(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
+            case UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
+                Some(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
+            case _ => None
+        }
+        lsq match {
+            case Some(q) =>
+                withLsqSnapshot(lsqDriver.query(q)).map {
+                    case Right(utxos) => Right(utxos)
+                    case Left(err) =>
+                        Left(UtxoQueryError.NotSupported(query, reason = err.getMessage))
+                }
+            case None =>
+                Future.successful(
+                  Left(
+                    UtxoQueryError.NotSupported(
+                      query = query,
+                      reason = "LocalNodeAccess supports only Simple(FromAddress) / " +
+                          "Simple(FromInputs) without filter/limit/offset/minTotal; " +
+                          "pair with BackupSource.Blockfrost for richer queries"
+                    )
+                  )
                 )
-              )
-            )
+        }
     }
 
-    private def runUtxoLsq(q: LsqQuery[Utxos]): Future[Either[UtxoQueryError, Utxos]] =
-        withLsqSnapshot(lsqDriver.query(q).map(Right(_)))
+    /** Acquire-query-release a single typed `LsqQuery`. Surfaces `LsqError` as `Future.failed`
+      * because every `LsqError` case is itself a `RuntimeException` — methods using this helper
+      * don't have a typed-error channel in `BlockchainProvider`.
+      */
+    private def runLsq[A](q: LsqQuery[A]): Future[A] =
+        withLsqSnapshot(lsqDriver.query(q)).flatMap(_.fold(Future.failed, Future.successful))
 
     private val lsqGate = new AtomicReference[Future[Unit]](Future.unit)
 
@@ -165,17 +180,20 @@ final class LocalNodeAccess private (
         prev.transformWith(_ => op).andThen { case _ => nextGate.success(()) }
     }
 
-    private def withLsqSnapshot[A](body: => Future[A]): Future[A] = withLsqLock {
+    /** Acquire a snapshot, run `body`, release. `body` may itself return a typed `Left(LsqError)`
+      * (e.g. an era-mismatch on the inner query) — both acquire-time and query-time errors flow
+      * through the same `Either` so callers see one error channel.
+      */
+    private def withLsqSnapshot[A](
+        body: => Future[Either[LsqError, A]]
+    ): Future[Either[LsqError, A]] = withLsqLock {
         lsqDriver.acquire(LocalStateQueryMessage.AcquireTarget.VolatileTip).flatMap {
             case Right(()) =>
                 body.transformWith { result =>
-                    lsqDriver
-                        .release()
-                        .recover { case _ => () }
-                        .flatMap(_ => Future.fromTry(result))
+                    lsqDriver.release().recover { case _ => () }.transform(_ => result)
                 }
             case Left(failure) =>
-                Future.failed(new RuntimeException(s"LSQ acquire failed: $failure"))
+                Future.successful(Left(LsqError.AcquireRejected(failure)))
         }
     }
 

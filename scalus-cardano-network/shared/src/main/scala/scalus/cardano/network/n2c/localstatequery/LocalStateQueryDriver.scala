@@ -95,13 +95,17 @@ final class LocalStateQueryDriver(
     /** Issue a typed query against the held snapshot. Caller must have completed an [[acquire]]
       * (`Right(())`) before calling.
       *
-      * The future fails on:
-      *   - `IllegalStateException` if the driver is closed or no snapshot is held
-      *   - `IllegalStateException` if the peer sends an unexpected message in `Querying`
-      *   - whatever the per-query result decoder raises on malformed result bytes
-      *   - `IllegalStateException` if the peer EOFs mid-query
+      *   - `Right(a)` on `MsgResult` whose payload decodes cleanly.
+      *   - `Left(LsqError.EraMismatch)` when a `QueryIfCurrent` lands on a different era than the
+      *     node is currently in — see [[LsqQuery.QueryIfCurrent]]'s envelope peel.
+      *   - `Left(LsqError.DecodeFailure)` when the result CBOR doesn't parse against the query's
+      *     decoder. Distinct from `EraMismatch` because the latter is a documented protocol-level
+      *     condition, while a decode failure means our codec disagrees with the node's.
+      *   - `Future.failed(IllegalStateException)` for connection-level faults (driver closed,
+      *     unexpected message in `Querying`, peer EOF mid-query). These are not recoverable at the
+      *     LSQ layer — caller should tear the connection down.
       */
-    def query[A](q: LsqQuery[A]): Future[A] = {
+    def query[A](q: LsqQuery[A]): Future[Either[LsqError, A]] = {
         if closed then return Future.failed(new IllegalStateException("driver closed"))
         if !acquired then
             return Future.failed(
@@ -114,7 +118,9 @@ final class LocalStateQueryDriver(
             .flatMap {
                 case Some(MsgResult(resultBytes)) =>
                     try Future.successful(q.decode(resultBytes.bytes))
-                    catch case NonFatal(t) => Future.failed(t)
+                    catch
+                        case NonFatal(t) =>
+                            Future.successful(Left(LsqError.DecodeFailure(t.toString)))
                 case Some(other) =>
                     Future.failed(unexpectedMessage("awaiting Result", other))
                 case None =>

@@ -39,8 +39,16 @@ sealed trait LsqQuery[A]:
     /** Splice the query body into `MsgQuery`. */
     def write(w: Writer): Writer
 
-    /** Decode the result CBOR (the opaque payload of `MsgResult`) into a typed value. */
-    def decode(bytes: Array[Byte]): A
+    /** Decode the result CBOR (the opaque payload of `MsgResult`) into a typed value.
+      *
+      *   - `Right(a)` on a successful decode.
+      *   - `Left(LsqError.EraMismatch)` when a `QueryIfCurrent` envelope reports a different
+      *     current era than the one queried.
+      *
+      * Internal per-era decoder failures (malformed inner CBOR) still throw; the driver lifts those
+      * into `Left(LsqError.DecodeFailure)` at the `query` boundary.
+      */
+    def decode(bytes: Array[Byte]): Either[LsqError, A]
 
 object LsqQuery {
 
@@ -65,7 +73,8 @@ object LsqQuery {
       */
     case object GetChainPoint extends LsqQuery[Point]:
         def write(w: Writer): Writer = w.writeArrayHeader(1).writeInt(3)
-        def decode(bytes: Array[Byte]): Point = Cborer.decode(bytes).to[Point].value
+        def decode(bytes: Array[Byte]): Either[LsqError, Point] =
+            Right(Cborer.decode(bytes).to[Point].value)
 
     /** Common shape for any `QueryIfCurrent era q` query.
       *
@@ -78,9 +87,8 @@ object LsqQuery {
       *     The leading byte is `0x82`.
       *
       * The byte-level peel relies on canonical CBOR: definite-length array(1) = `0x81`, array(2) =
-      * `0x82`. On `0x82` we parse the mismatch pair and surface
-      * [[scalus.cardano.network.n2c.localstatequery.LsqEraMismatchException]] so the caller sees a
-      * structured failure rather than a generic decode error.
+      * `0x82`. On `0x82` we parse the mismatch pair and surface `Left(LsqError.EraMismatch(...))`
+      * so the caller sees a structured failure rather than a generic decode error.
       */
     sealed trait QueryIfCurrent[A] extends LsqQuery[A]:
         def era: Int
@@ -99,17 +107,14 @@ object LsqQuery {
             writeShelleyQuery(w)
         }
 
-        final def decode(bytes: Array[Byte]): A = {
+        final def decode(bytes: Array[Byte]): Either[LsqError, A] = {
             val head = bytes.headOption.map(_ & 0xff).getOrElse(-1)
             head match {
                 case 0x81 =>
-                    decodeInner(java.util.Arrays.copyOfRange(bytes, 1, bytes.length))
+                    Right(decodeInner(java.util.Arrays.copyOfRange(bytes, 1, bytes.length)))
                 case 0x82 =>
                     val mismatch = Cborer.decode(bytes).to[EraMismatch].value
-                    throw new LsqEraMismatchException(
-                      expected = mismatch.expected,
-                      actual = mismatch.actual
-                    )
+                    Left(LsqError.EraMismatch(mismatch.expected, mismatch.actual))
                 case _ =>
                     throw new IllegalArgumentException(
                       "LSQ QueryIfCurrent envelope: expected array(1) (0x81 OK) or array(2) " +
@@ -199,13 +204,3 @@ object EraMismatch {
             EraMismatch(r.read[EraInfo](), r.read[EraInfo]())
         }
 }
-
-/** Thrown when a `QueryIfCurrent` returns an [[EraMismatch]] envelope. Carries both eras so callers
-  * can recover (e.g. retry with the actual era's decoder, or downgrade to
-  * `BackupSource.Blockfrost`).
-  */
-final class LsqEraMismatchException(val expected: EraInfo, val actual: EraInfo)
-    extends RuntimeException(
-      s"LSQ QueryIfCurrent era mismatch: queried era ${expected.eraIdx} (${expected.eraName}), " +
-          s"node is at era ${actual.eraIdx} (${actual.eraName})"
-    )

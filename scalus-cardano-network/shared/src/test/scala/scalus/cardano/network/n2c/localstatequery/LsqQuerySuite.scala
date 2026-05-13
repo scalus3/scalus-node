@@ -19,7 +19,7 @@ class LsqQuerySuite extends AnyFunSuite {
     test("GetChainPoint result decodes Origin") {
         val resultBytes = Array[Byte](0x80.toByte)
         val decoded = LsqQuery.GetChainPoint.decode(resultBytes)
-        assert(decoded == Point.Origin)
+        assert(decoded == Right(Point.Origin))
     }
 
     test("GetChainPoint result decodes BlockPoint") {
@@ -27,7 +27,7 @@ class LsqQuerySuite extends AnyFunSuite {
         val point: Point = Point.BlockPoint(slot = 42L, hash = hash)
         val resultBytes = Cbor.encode(point).toByteArray
         val decoded = LsqQuery.GetChainPoint.decode(resultBytes)
-        assert(decoded == point)
+        assert(decoded == Right(point))
     }
 
     test("GetCurrentPParams Conway (era=6) encodes as [0, [0, [6, [3]]]]") {
@@ -55,7 +55,7 @@ class LsqQuerySuite extends AnyFunSuite {
         val envelope: Array[Byte] = Array(0x81.toByte) ++ inner
         val q = LsqQuery.GetCurrentPParams[Array[Byte]](era = 6, decoder = identity)
         val decoded = q.decode(envelope)
-        assert(decoded.sameElements(inner))
+        assert(decoded.exists(_.sameElements(inner)))
     }
 
     test("QueryIfCurrent envelope rejects unknown leading byte") {
@@ -64,7 +64,7 @@ class LsqQuerySuite extends AnyFunSuite {
         intercept[IllegalArgumentException](q.decode(bad))
     }
 
-    test("QueryIfCurrent envelope: array(2) parses as LsqEraMismatchException") {
+    test("QueryIfCurrent envelope: array(2) parses as Left(LsqError.EraMismatch)") {
         val q = LsqQuery.GetCurrentPParams[Unit](era = 6, decoder = _ => ())
         // [[6, "Conway"], [5, "Babbage"]] — observed shape from yaci-devkit when queried at
         // an era the node isn't currently in.
@@ -78,16 +78,19 @@ class LsqQuerySuite extends AnyFunSuite {
           0x05.toByte,
           0x67.toByte // EraInfo(5, "Babbage")
         ) ++ "Babbage".getBytes("US-ASCII")
-        val ex = intercept[LsqEraMismatchException](q.decode(envelope))
-        assert(ex.expected == EraInfo(6, "Conway"))
-        assert(ex.actual == EraInfo(5, "Babbage"))
+        q.decode(envelope) match {
+            case Left(LsqError.EraMismatch(expected, actual)) =>
+                assert(expected == EraInfo(6, "Conway"))
+                assert(actual == EraInfo(5, "Babbage"))
+            case other => fail(s"expected Left(EraMismatch), got $other")
+        }
     }
 
     test("GetCurrentPParams.decode delegates to injected decoder after envelope peel") {
         val sentinel = new Object
         val q = LsqQuery.GetCurrentPParams[AnyRef](era = 6, decoder = _ => sentinel)
         val envelope: Array[Byte] = Array(0x81.toByte, 0x01.toByte)
-        assert(q.decode(envelope) eq sentinel)
+        assert(q.decode(envelope).exists(_ eq sentinel))
     }
 
     test("GetUTxOByAddress (era=6, empty set) encodes envelope + [6, array(0)]") {
@@ -111,13 +114,13 @@ class LsqQuerySuite extends AnyFunSuite {
         val envelope: Array[Byte] = Array(0x81.toByte, 0xa0.toByte)
         val q = LsqQuery.GetUTxOByAddress(era = 6, addresses = Set.empty)
         val utxos = q.decode(envelope)
-        assert(utxos.isEmpty)
+        assert(utxos.exists(_.isEmpty))
     }
 
     test("GetUTxOByTxIn.decode parses empty Utxos map (envelope [{}] = 81 a0)") {
         val envelope: Array[Byte] = Array(0x81.toByte, 0xa0.toByte)
         val q = LsqQuery.GetUTxOByTxIn(era = 6, inputs = Set.empty)
         val utxos = q.decode(envelope)
-        assert(utxos.isEmpty)
+        assert(utxos.exists(_.isEmpty))
     }
 }
