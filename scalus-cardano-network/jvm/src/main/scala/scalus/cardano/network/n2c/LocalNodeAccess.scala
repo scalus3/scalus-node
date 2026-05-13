@@ -137,16 +137,16 @@ final class LocalNodeAccess private (
       * as the "this backup can't answer, try another" signal.
       */
     def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] = {
-        val lsq: Option[LsqQuery[Utxos]] = query match {
+        val buildLsq: Option[Int => LsqQuery[Utxos]] = query match {
             case UtxoQuery.Simple(UtxoSource.FromAddress(addr), None, None, None, None) =>
-                Some(LsqQuery.GetUTxOByAddress(era = submitEra, addresses = Set(addr)))
+                Some(era => LsqQuery.GetUTxOByAddress(era = era, addresses = Set(addr)))
             case UtxoQuery.Simple(UtxoSource.FromInputs(inputs), None, None, None, None) =>
-                Some(LsqQuery.GetUTxOByTxIn(era = submitEra, inputs = inputs))
+                Some(era => LsqQuery.GetUTxOByTxIn(era = era, inputs = inputs))
             case _ => None
         }
-        lsq match {
-            case Some(q) =>
-                withLsqSnapshot(lsqDriver.query(q)).map {
+        buildLsq match {
+            case Some(mk) =>
+                withCurrentEra(era => lsqDriver.query(mk(era))).map {
                     case Right(utxos) => Right(utxos)
                     case Left(err) =>
                         Left(UtxoQueryError.NotSupported(query, reason = err.getMessage))
@@ -171,6 +171,20 @@ final class LocalNodeAccess private (
       */
     private def runLsq[A](q: LsqQuery[A]): Future[A] =
         withLsqSnapshot(lsqDriver.query(q)).flatMap(_.fold(Future.failed, Future.successful))
+
+    /** Acquire a snapshot, resolve the node's current HFC era via `GetCurrentEra`, then run `body`
+      * against that era — all within the same `Acquired` state. Lets era-parameterised queries
+      * (`GetUTxOByAddress`, `GetUTxOByTxIn`) follow the node across hard forks without callers
+      * having to track the era themselves.
+      */
+    private def withCurrentEra[A](
+        body: Int => Future[Either[LsqError, A]]
+    ): Future[Either[LsqError, A]] = withLsqSnapshot {
+        lsqDriver.query(LsqQuery.GetCurrentEra).flatMap {
+            case Right(era) => body(era)
+            case Left(err)  => Future.successful(Left(err))
+        }
+    }
 
     private val lsqGate = new AtomicReference[Future[Unit]](Future.unit)
 

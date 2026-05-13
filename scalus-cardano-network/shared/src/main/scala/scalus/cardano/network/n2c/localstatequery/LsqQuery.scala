@@ -76,6 +76,26 @@ object LsqQuery {
         def decode(bytes: Array[Byte]): Either[LsqError, Point] =
             Right(Cborer.decode(bytes).to[Point].value)
 
+    /** `QueryHardFork GetCurrentEra` — returns the HFC era index the node is currently in
+      * (Shelley=1, Allegra=2, …, Babbage=5, Conway=6). Lets callers pick the right era for a
+      * subsequent `QueryIfCurrent` instead of hardcoding it.
+      *
+      * Wire shape `[0, [2, [1]]]` per the CDDL: top-level `[0, BlockQuery]`,
+      * `BlockQuery = [2, QueryHardFork]`, `QueryHardFork = [1]` for `GetCurrentEra`.
+      *
+      * Result is a bare CBOR int (`EraIndex`'s `EncCBOR` writes the era index directly, no
+      * envelope). If the node ever sends a `[era]` single-element list instead, the IT probe will
+      * surface a `DecodeFailure` and we'll add an envelope peel.
+      */
+    case object GetCurrentEra extends LsqQuery[Int]:
+        def write(w: Writer): Writer = {
+            w.writeArrayHeader(2).writeInt(0)
+            w.writeArrayHeader(2).writeInt(2)
+            w.writeArrayHeader(1).writeInt(1)
+        }
+        def decode(bytes: Array[Byte]): Either[LsqError, Int] =
+            Right(Cborer.decode(bytes).to[Int].value)
+
     /** Common shape for any `QueryIfCurrent era q` query.
       *
       * Result envelope observed against cardano-node / yaci-devkit at V16:

@@ -30,6 +30,22 @@ class LsqQuerySuite extends AnyFunSuite {
         assert(decoded == Right(point))
     }
 
+    test("GetCurrentEra encodes as [0, [2, [1]]] = 82 00 82 02 81 01") {
+        // 82  array(2)
+        //   00  uint 0                 ; top: BlockQuery
+        //   82  array(2)
+        //     02  uint 2               ; BlockQuery: QueryHardFork
+        //     81  array(1)
+        //       01  uint 1             ; QueryHardFork: GetCurrentEra
+        assert(encHex(LsqQuery.GetCurrentEra) == "820082028101")
+    }
+
+    test("GetCurrentEra result decodes the era index") {
+        // 0x06 = Conway era index in canonical single-byte CBOR.
+        assert(LsqQuery.GetCurrentEra.decode(Array[Byte](0x06.toByte)) == Right(6))
+        assert(LsqQuery.GetCurrentEra.decode(Array[Byte](0x05.toByte)) == Right(5))
+    }
+
     test("GetCurrentPParams Conway (era=6) encodes as [0, [0, [6, [3]]]]") {
         // 82  array(2)
         //   00  uint 0                     ; top: BlockQuery
