@@ -28,7 +28,7 @@ import scalus.cardano.ledger.{SlotNo, TransactionHash}
   * `[eraIdx, eraGenTxId]` — same era-discriminated envelope as `MsgSubmitTx`'s transaction (without
   * the tag-24 EmbeddedCBOR wrap; the txId bytes are just the 32-byte hash, not nested CBOR).
   *
-  * Minimal surface for [[scalus.cardano.network.n2c.LocalNodeProvider#checkTransaction]]: acquire a
+  * Minimal surface for [[scalus.cardano.network.n2c.LocalNodeAccess#checkInMempool]]: acquire a
   * mempool snapshot, ask `HasTx`, release. `NextTx` and `GetSizes` aren't modelled today; the
   * decoder rejects those tags so any unexpected server message surfaces loudly.
   */

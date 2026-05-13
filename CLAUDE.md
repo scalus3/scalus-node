@@ -36,7 +36,7 @@ Snapshots of `org.scalus` artifacts (the upstream `scalus-cardano-ledger`, etc.)
 | `scalus-streaming-core` | JVM + JS | Rollback-aware streaming engine, `BlockchainStreamProvider` ADTs, query/event types, `Mailbox`, `ChainStore`/`KvChainStore`, replay sources. The hub every other module depends on. |
 | `scalus-streaming-fs2` | JVM + JS | fs2 `Stream` adapter — `Fs2BlockchainStreamProvider`, `Fs2StreamingEmulator`. |
 | `scalus-streaming-ox` | JVM only | softwaremill ox direct-style adapter (ox is JVM-only). |
-| `scalus-cardano-network` | JVM + JS | Ouroboros Node-to-Node transport: SDU multiplexer, handshake, chain-sync, block-fetch, keep-alive. Browser JS is *not* targeted — needs raw sockets. |
+| `scalus-cardano-network` | JVM + JS | Ouroboros Node-to-Node transport: SDU multiplexer, handshake, chain-sync, block-fetch, keep-alive. Browser JS is *not* targeted — needs raw sockets. Also hosts `LocalNodeAccess` — the raw N2C facade (submit / LSQ / mempool monitor) implementing `LocalNodeBackend` from `scalus-streaming-core`; not a `BlockchainProvider`. |
 | `scalus-cardano-network-it` | JVM only | Integration tests against yaci-devkit via testcontainers. `Test/fork := true`. Not published. |
 | `scalus-chain-store-rocksdb` | JVM only | RocksDB-backed `ChainStore` (rocksdbjni native lib). |
 | `scalus-chain-store-mithril` | JVM only | Mithril snapshot restore: `mithril-client-wasm` runs on Chicory; ImmutableDB block decoding + ledger-state ingestion. |

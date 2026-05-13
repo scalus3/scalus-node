@@ -7,7 +7,7 @@ import scalus.cardano.network.{ChainApplier, ClientConfig, NetworkMagic, NodeToN
 import scalus.cardano.network.n2c.{N2cChainApplier, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
 import scalus.cardano.node.stream.engine.persistence.{EnginePersistenceStore, FileEnginePersistenceStore}
@@ -26,14 +26,17 @@ import scala.concurrent.{ExecutionContext, Future}
 class Fs2BlockchainStreamProvider(
     engine: Engine,
     preClose: () => Future[Unit] = () => Future.unit
-) extends BaseStreamProvider[IO, IOStream](engine) {
+)(using ExecutionContext)
+    extends BaseStreamProvider[IO, IOStream](engine) {
 
     protected def liftFuture[A](fa: => Future[A]): IO[A] = IO.fromFuture(IO(fa))
 
     protected def pureF[A](a: A): IO[A] = IO.pure(a)
 
     def close(): IO[Unit] =
-        liftFuture(preClose()) *> liftFuture(engine.closeAllSubscribers())
+        liftFuture(preClose()) *>
+            liftFuture(engine.closeAllSubscribers()) *>
+            liftFuture(engine.closeBackends())
 }
 
 object Fs2BlockchainStreamProvider {
@@ -53,9 +56,14 @@ object Fs2BlockchainStreamProvider {
         config.chainSync match
             case ChainSyncSource.Synthetic =>
                 for {
-                    backup <- buildBackup(config.backup, config.cardanoInfo)
+                    slots <- buildBackup(config.backup, config.cardanoInfo)
                     _ <- bootstrapIfNeeded(config, persistence)
-                    engine <- buildEngine(config, backup, persistence, config.fallbackReplaySources)
+                    engine <- buildEngine(
+                      config,
+                      slots,
+                      persistence,
+                      config.fallbackReplaySources
+                    )
                 } yield new Fs2BlockchainStreamProvider(
                   engine,
                   persistenceTeardown(persistence, engine, config)
@@ -115,7 +123,7 @@ object Fs2BlockchainStreamProvider {
       */
     private def buildEngine(
         config: StreamProviderConfig,
-        backup: Option[BlockchainProvider],
+        slots: BackupSlots,
         persistence: EnginePersistenceStore,
         fallbackReplaySources: List[ReplaySource]
     )(using ExecutionContext): IO[Engine] = {
@@ -124,11 +132,12 @@ object Fs2BlockchainStreamProvider {
                 IO.pure(
                   new Engine(
                     config.cardanoInfo,
-                    backup,
+                    slots.full,
                     Engine.DefaultSecurityParam,
                     persistence,
                     fallbackReplaySources,
-                    config.chainStore
+                    config.chainStore,
+                    slots.localNode
                   )
                 )
             case Some(state) =>
@@ -137,11 +146,12 @@ object Fs2BlockchainStreamProvider {
                     Engine.rebuildFrom(
                       state,
                       config.cardanoInfo,
-                      backup,
+                      slots.full,
                       Engine.DefaultSecurityParam,
                       persistence,
                       fallbackReplaySources,
-                      config.chainStore
+                      config.chainStore,
+                      slots.localNode
                     )
                   )
                 )
@@ -187,10 +197,10 @@ object Fs2BlockchainStreamProvider {
         persistence: EnginePersistenceStore
     )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
         for {
-            backup <- buildBackup(config.backup, config.cardanoInfo)
+            slots <- buildBackup(config.backup, config.cardanoInfo)
             _ <- bootstrapIfNeeded(config, persistence)
             fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
-            engine <- buildEngine(config, backup, persistence, fallbacks)
+            engine <- buildEngine(config, slots, persistence, fallbacks)
             conn <- IO.fromFuture(
               IO(
                 NodeToNodeClient.connect(
@@ -246,9 +256,9 @@ object Fs2BlockchainStreamProvider {
         persistence: EnginePersistenceStore
     )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
         for {
-            backup <- buildBackup(config.backup, config.cardanoInfo)
+            slots <- buildBackup(config.backup, config.cardanoInfo)
             _ <- bootstrapIfNeeded(config, persistence)
-            engine <- buildEngine(config, backup, persistence, config.fallbackReplaySources)
+            engine <- buildEngine(config, slots, persistence, config.fallbackReplaySources)
             conn <- IO.fromFuture(
               IO(
                 NodeToClientClient.connect(
@@ -282,7 +292,7 @@ object Fs2BlockchainStreamProvider {
     def synthetic(
         cardanoInfo: CardanoInfo,
         backup: Option[BlockchainProvider] = None
-    ): Fs2BlockchainStreamProvider = {
+    )(using ExecutionContext): Fs2BlockchainStreamProvider = {
         val engine = new Engine(cardanoInfo, backup, Engine.DefaultSecurityParam)
         new Fs2BlockchainStreamProvider(engine)
     }
@@ -290,25 +300,23 @@ object Fs2BlockchainStreamProvider {
     private def buildBackup(
         source: BackupSource,
         cardanoInfo: CardanoInfo
-    )(using ExecutionContext): IO[Option[BlockchainProvider]] = source match
+    )(using ExecutionContext): IO[BackupSlots] = source match
         case BackupSource.Blockfrost(apiKey, network, maxConcurrent) =>
             IO.fromFuture(IO(network match {
                 case BlockfrostNetwork.Mainnet => BlockfrostProvider.mainnet(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preview => BlockfrostProvider.preview(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preprod => BlockfrostProvider.preprod(apiKey, maxConcurrent)
-            })).map(Some(_))
+            })).map(BackupSlots.full)
         case BackupSource.LocalNode(socketPath, networkMagic) =>
             IO.fromFuture(
               IO(
-                scalus.cardano.network.n2c.LocalNodeProvider.connect(
+                scalus.cardano.network.n2c.LocalNodeAccess.connect(
                   java.nio.file.Path.of(socketPath),
                   scalus.cardano.network.NetworkMagic(networkMagic),
                   cardanoInfo
                 )
               )
-            ).map(Some(_))
-        case BackupSource.Custom(provider) =>
-            IO.pure(Some(provider))
-        case BackupSource.NoBackup =>
-            IO.pure(None)
+            ).map(BackupSlots.localNode)
+        case BackupSource.Custom(provider) => IO.pure(BackupSlots.full(provider))
+        case BackupSource.NoBackup         => IO.pure(BackupSlots.empty)
 }

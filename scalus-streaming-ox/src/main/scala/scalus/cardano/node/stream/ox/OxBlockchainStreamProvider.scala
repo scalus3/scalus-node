@@ -6,7 +6,7 @@ import scalus.cardano.network.{ChainApplier, ChainApplierHandle, ClientConfig, N
 import scalus.cardano.network.n2c.{N2cChainApplier, N2cChainApplierHandle, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
 import scalus.cardano.node.stream.engine.persistence.{EnginePersistenceStore, FileEnginePersistenceStore}
@@ -40,6 +40,7 @@ class OxBlockchainStreamProvider(
     def close(): Id[Unit] = {
         liftFuture(preClose())
         liftFuture(engine.closeAllSubscribers())
+        liftFuture(engine.closeBackends())
     }
 }
 
@@ -61,10 +62,10 @@ object OxBlockchainStreamProvider {
         val persistence = resolvePersistence(config)
         config.chainSync match
             case ChainSyncSource.Synthetic =>
-                val backup = buildBackup(config.backup, config.cardanoInfo)
+                val slots = buildBackup(config.backup, config.cardanoInfo)
                 bootstrapIfNeeded(config, persistence)
                 val engine =
-                    buildEngine(config, backup, persistence, config.fallbackReplaySources)
+                    buildEngine(config, slots, persistence, config.fallbackReplaySources)
                 new OxBlockchainStreamProvider(
                   engine,
                   persistenceTeardown(persistence, engine, config)
@@ -102,7 +103,7 @@ object OxBlockchainStreamProvider {
 
     private def buildEngine(
         config: StreamProviderConfig,
-        backup: Option[BlockchainProvider],
+        slots: BackupSlots,
         persistence: EnginePersistenceStore,
         fallbackReplaySources: List[ReplaySource]
     )(using ExecutionContext): Engine = {
@@ -110,22 +111,24 @@ object OxBlockchainStreamProvider {
             case None =>
                 new Engine(
                   config.cardanoInfo,
-                  backup,
+                  slots.full,
                   Engine.DefaultSecurityParam,
                   persistence,
                   fallbackReplaySources,
-                  config.chainStore
+                  config.chainStore,
+                  slots.localNode
                 )
             case Some(state) =>
                 Await.result(
                   Engine.rebuildFrom(
                     state,
                     config.cardanoInfo,
-                    backup,
+                    slots.full,
                     Engine.DefaultSecurityParam,
                     persistence,
                     fallbackReplaySources,
-                    config.chainStore
+                    config.chainStore,
+                    slots.localNode
                   ),
                   Duration.Inf
                 )
@@ -162,10 +165,10 @@ object OxBlockchainStreamProvider {
         n: ChainSyncSource.N2N,
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
-        val backup = buildBackup(config.backup, config.cardanoInfo)
+        val slots = buildBackup(config.backup, config.cardanoInfo)
         bootstrapIfNeeded(config, persistence)
         val fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
-        val engine = buildEngine(config, backup, persistence, fallbacks)
+        val engine = buildEngine(config, slots, persistence, fallbacks)
         val conn: NodeToNodeConnection = Await.result(
           NodeToNodeClient
               .connect(n.host, n.port, NetworkMagic(n.networkMagic), ClientConfig.default),
@@ -221,9 +224,10 @@ object OxBlockchainStreamProvider {
         n: ChainSyncSource.N2C,
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
-        val backup = buildBackup(config.backup, config.cardanoInfo)
+        val slots = buildBackup(config.backup, config.cardanoInfo)
         bootstrapIfNeeded(config, persistence)
-        val engine = buildEngine(config, backup, persistence, config.fallbackReplaySources)
+        val engine =
+            buildEngine(config, slots, persistence, config.fallbackReplaySources)
         val conn = Await.result(
           NodeToClientClient.connect(
             java.nio.file.Path.of(n.socketPath),
@@ -268,17 +272,17 @@ object OxBlockchainStreamProvider {
     private def buildBackup(
         source: BackupSource,
         cardanoInfo: CardanoInfo
-    )(using ExecutionContext): Option[BlockchainProvider] = source match
+    )(using ExecutionContext): BackupSlots = source match
         case BackupSource.Blockfrost(apiKey, network, maxConcurrent) =>
             val fut = network match
                 case BlockfrostNetwork.Mainnet => BlockfrostProvider.mainnet(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preview => BlockfrostProvider.preview(apiKey, maxConcurrent)
                 case BlockfrostNetwork.Preprod => BlockfrostProvider.preprod(apiKey, maxConcurrent)
-            Some(Await.result(fut, Duration.Inf))
+            BackupSlots.full(Await.result(fut, Duration.Inf))
         case BackupSource.LocalNode(socketPath, networkMagic) =>
-            Some(
+            BackupSlots.localNode(
               Await.result(
-                scalus.cardano.network.n2c.LocalNodeProvider.connect(
+                scalus.cardano.network.n2c.LocalNodeAccess.connect(
                   java.nio.file.Path.of(socketPath),
                   scalus.cardano.network.NetworkMagic(networkMagic),
                   cardanoInfo
@@ -286,6 +290,6 @@ object OxBlockchainStreamProvider {
                 Duration.Inf
               )
             )
-        case BackupSource.Custom(provider) => Some(provider)
-        case BackupSource.NoBackup         => None
+        case BackupSource.Custom(provider) => BackupSlots.full(provider)
+        case BackupSource.NoBackup         => BackupSlots.empty
 }
