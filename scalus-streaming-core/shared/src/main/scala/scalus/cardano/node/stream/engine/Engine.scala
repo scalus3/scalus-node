@@ -402,6 +402,15 @@ final class Engine(
         byKey.clear()
     }
 
+    /** Tear down resources owned by the backup slots. Today only [[LocalNodeBackend]] owns a
+      * connection (Unix-domain socket + mini-protocol drivers); the [[BlockchainReader]] backup
+      * (Blockfrost) is a stateless HTTP client and doesn't expose a `close`. Called from each
+      * flavor's provider shutdown path after `closeAllSubscribers`. Idempotent because
+      * `LocalNodeBackend.close` is.
+      */
+    def closeBackends()(using ExecutionContext): Future[Unit] =
+        localNode.fold(Future.unit)(_.close())
+
     /** Fail every subscriber with `cause` and clear the registries. Used by the chain-sync wiring
       * path when the applier's `done` future completes with an error (decode failure,
       * NoIntersection, unsupported era, transport-level teardown, …). Sends the cause via

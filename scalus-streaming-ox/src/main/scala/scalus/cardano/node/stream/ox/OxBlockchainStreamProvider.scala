@@ -40,6 +40,7 @@ class OxBlockchainStreamProvider(
     def close(): Id[Unit] = {
         liftFuture(preClose())
         liftFuture(engine.closeAllSubscribers())
+        liftFuture(engine.closeBackends())
     }
 }
 

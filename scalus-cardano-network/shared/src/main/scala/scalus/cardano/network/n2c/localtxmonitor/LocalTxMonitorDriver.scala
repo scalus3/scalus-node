@@ -22,7 +22,7 @@ import scala.concurrent.{ExecutionContext, Future}
   * }}}
   *
   * Only `acquire / hasTx / release / close` are exposed today — enough to back
-  * [[scalus.cardano.network.n2c.LocalNodeAccess#checkTransaction]]. `NextTx` and `GetSizes` (CDDL
+  * [[scalus.cardano.network.n2c.LocalNodeAccess#checkInMempool]]. `NextTx` and `GetSizes` (CDDL
   * tags 5/6 and 9/10) are deferred and the message ADT does not model them; the decoder rejects
   * those tags so any unexpected server message surfaces loudly.
   *

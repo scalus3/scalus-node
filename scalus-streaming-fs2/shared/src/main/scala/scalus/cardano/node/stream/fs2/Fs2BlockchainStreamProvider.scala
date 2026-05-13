@@ -26,14 +26,17 @@ import scala.concurrent.{ExecutionContext, Future}
 class Fs2BlockchainStreamProvider(
     engine: Engine,
     preClose: () => Future[Unit] = () => Future.unit
-) extends BaseStreamProvider[IO, IOStream](engine) {
+)(using ExecutionContext)
+    extends BaseStreamProvider[IO, IOStream](engine) {
 
     protected def liftFuture[A](fa: => Future[A]): IO[A] = IO.fromFuture(IO(fa))
 
     protected def pureF[A](a: A): IO[A] = IO.pure(a)
 
     def close(): IO[Unit] =
-        liftFuture(preClose()) *> liftFuture(engine.closeAllSubscribers())
+        liftFuture(preClose()) *>
+            liftFuture(engine.closeAllSubscribers()) *>
+            liftFuture(engine.closeBackends())
 }
 
 object Fs2BlockchainStreamProvider {
@@ -289,7 +292,7 @@ object Fs2BlockchainStreamProvider {
     def synthetic(
         cardanoInfo: CardanoInfo,
         backup: Option[BlockchainProvider] = None
-    ): Fs2BlockchainStreamProvider = {
+    )(using ExecutionContext): Fs2BlockchainStreamProvider = {
         val engine = new Engine(cardanoInfo, backup, Engine.DefaultSecurityParam)
         new Fs2BlockchainStreamProvider(engine)
     }
