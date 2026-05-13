@@ -2,7 +2,7 @@ package scalus.cardano.node.stream.engine
 
 import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, TransactionHash, TransactionInput, TransactionOutput, Utxo, Utxos}
 import scalus.cardano.node.{BlockchainReader, TransactionStatus, UtxoQuery, UtxoQueryError}
-import scalus.cardano.node.stream.{ChainPoint, ChainTip, StartFrom, UtxoEvent}
+import scalus.cardano.node.stream.{ChainPoint, ChainTip, LocalNodeBackend, StartFrom, UtxoEvent}
 import scalus.cardano.node.stream.engine.persistence.{AppliedBlockSummary, BucketDelta, BucketState, EnginePersistenceStore, EngineSnapshotFile, JournalRecord, PersistedEngineState}
 import scalus.uplc.builtin.Data
 
@@ -42,7 +42,8 @@ final class Engine(
     val securityParam: Int,
     val persistence: EnginePersistenceStore = EnginePersistenceStore.noop,
     val fallbackReplaySources: List[replay.ReplaySource] = Nil,
-    val chainStore: Option[ChainStore] = None
+    val chainStore: Option[ChainStore] = None,
+    val localNode: Option[LocalNodeBackend] = None
 ) {
 
     import Engine.UtxoSubscription
@@ -917,7 +918,8 @@ object Engine {
         securityParam: Int,
         persistence: EnginePersistenceStore,
         fallbackReplaySources: List[replay.ReplaySource] = Nil,
-        chainStore: Option[ChainStore] = None
+        chainStore: Option[ChainStore] = None,
+        localNode: Option[LocalNodeBackend] = None
     )(using scala.concurrent.ExecutionContext): Future[Engine] = {
         val engine = new Engine(
           cardanoInfo,
@@ -925,7 +927,8 @@ object Engine {
           securityParam,
           persistence,
           fallbackReplaySources,
-          chainStore
+          chainStore,
+          localNode
         )
         engine.restoreInto(state).map(_ => engine)
     }

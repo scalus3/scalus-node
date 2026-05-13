@@ -22,7 +22,7 @@ import scala.concurrent.{ExecutionContext, Future}
   * }}}
   *
   * Only `acquire / hasTx / release / close` are exposed today — enough to back
-  * [[scalus.cardano.network.n2c.LocalNodeProvider#checkTransaction]]. `NextTx` and `GetSizes` (CDDL
+  * [[scalus.cardano.network.n2c.LocalNodeAccess#checkTransaction]]. `NextTx` and `GetSizes` (CDDL
   * tags 5/6 and 9/10) are deferred and the message ADT does not model them; the decoder rejects
   * those tags so any unexpected server message surfaces loudly.
   *
@@ -30,7 +30,7 @@ import scala.concurrent.{ExecutionContext, Future}
   * call. Same single-consumer contract as the sibling
   * [[scalus.cardano.network.n2c.localstatequery.LocalStateQueryDriver]] /
   * [[scalus.cardano.network.n2c.localtxsubmission.LocalTxSubmissionDriver]] — multi-tenant
-  * coordination is the caller's job (see [[LocalNodeProvider]]'s `lsqGate` for the existing
+  * coordination is the caller's job (see [[LocalNodeAccess]]'s `lsqGate` for the existing
   * async-mutex pattern).
   */
 final class LocalTxMonitorDriver(

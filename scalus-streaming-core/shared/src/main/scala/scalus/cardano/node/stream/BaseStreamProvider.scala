@@ -56,7 +56,9 @@ abstract class BaseStreamProvider[F[_], C[_]](
       * health checks and ops dashboards.
       */
     final def backupDiagnostics: Option[BackupDiagnosticsSnapshot] =
-        engine.backup.collect { case d: BackupDiagnostics => d.diagnostics }
+        engine.backup
+            .collect { case d: BackupDiagnostics => d.diagnostics }
+            .orElse(engine.localNode.map(_.diagnostics))
 
     // ------------------------------------------------------------------
     // Stream subscriptions
@@ -149,7 +151,10 @@ abstract class BaseStreamProvider[F[_], C[_]](
                 engine.backup match
                     case Some(bp) => bp.currentSlot
                     case None =>
-                        Future.failed(Engine.NoBackupConfiguredException("currentSlot"))
+                        engine.localNode match
+                            case Some(ln) => ln.currentSlot
+                            case None =>
+                                Future.failed(Engine.NoBackupConfiguredException("currentSlot"))
     }
 
     final def fetchLatestParams: F[ProtocolParams] = liftFuture {
@@ -163,7 +168,12 @@ abstract class BaseStreamProvider[F[_], C[_]](
                 engine.backup match
                     case Some(bp) => bp.findUtxos(query)
                     case None =>
-                        Future.successful(Left(UtxoQueryError.NotFound(noBackupSource(query))))
+                        engine.localNode match
+                            case Some(ln) => ln.findUtxos(query)
+                            case None =>
+                                Future.successful(
+                                  Left(UtxoQueryError.NotFound(noBackupSource(query)))
+                                )
         }
     }
 
@@ -173,7 +183,10 @@ abstract class BaseStreamProvider[F[_], C[_]](
             case None =>
                 engine.backup match {
                     case Some(bp) => bp.getDatum(datumHash)
-                    case None     => Future.successful(None)
+                    case None =>
+                        engine.localNode match
+                            case Some(ln) => ln.getDatum(datumHash)
+                            case None     => Future.successful(None)
                 }
         }
     }
@@ -184,7 +197,14 @@ abstract class BaseStreamProvider[F[_], C[_]](
             case None =>
                 engine.backup match
                     case Some(bp) => bp.checkTransaction(txHash)
-                    case None     => Future.successful(TransactionStatus.NotFound)
+                    case None =>
+                        engine.localNode match
+                            case Some(ln) =>
+                                ln.checkInMempool(txHash).map {
+                                    if _ then TransactionStatus.Pending
+                                    else TransactionStatus.NotFound
+                                }
+                            case None => Future.successful(TransactionStatus.NotFound)
         }
     }
 
@@ -197,7 +217,13 @@ abstract class BaseStreamProvider[F[_], C[_]](
                         case l @ Left(_)     => Future.successful(l)
                     }
                 case _ =>
-                    Future.successful(Left(noBackupSubmitError))
+                    engine.localNode match
+                        case Some(ln) =>
+                            ln.submit(transaction).flatMap {
+                                case r @ Right(hash) => engine.notifySubmit(hash).map(_ => r)
+                                case l @ Left(_)     => Future.successful(l)
+                            }
+                        case None => Future.successful(Left(noBackupSubmitError))
         }
 
     final def pollForConfirmation(

@@ -5,22 +5,21 @@ import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Address
 import scalus.cardano.ledger.{CardanoInfo, TransactionHash, TransactionInput}
-import scalus.cardano.node.TransactionStatus
 import scalus.cardano.network.NetworkMagic
-import scalus.cardano.network.n2c.LocalNodeProvider
+import scalus.cardano.network.n2c.LocalNodeAccess
 import scalus.cardano.node.{UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.uplc.builtin.ByteString
 
 import java.nio.file.{Files, Paths}
 import scala.concurrent.ExecutionContext.Implicits.global
 
-/** End-to-end IT for [[LocalNodeProvider]] against a real Cardano-node N2C socket. Yaci-devkit's
+/** End-to-end IT for [[LocalNodeAccess]] against a real Cardano-node N2C socket. Yaci-devkit's
   * `YaciCardanoContainer` doesn't expose the node Unix socket through its Java API (it surfaces only
   * the N2N TCP port, Ogmios, and a couple of HTTP services), so this suite is env-gated — set
   * `SCALUS_N2C_SOCKET` to a Unix-socket path the test process can `connect()` on, optionally
   * `SCALUS_N2C_NETWORK_MAGIC` (default 42 = yaci-devnet) and `SCALUS_N2C_ERA` (default 6 = Conway).
   *
-  * The `fetchLatestParams` test is Conway-only — `LocalNodeProvider` hardcodes the Conway PParams
+  * The `fetchLatestParams` test is Conway-only — `LocalNodeAccess` hardcodes the Conway PParams
   * decoder — and skips when `SCALUS_N2C_ERA` is not 6 (e.g. yaci-devkit defaults to Babbage; that
   * test will then skip while the rest of the suite still runs).
   *
@@ -34,7 +33,7 @@ import scala.concurrent.ExecutionContext.Implicits.global
   * CBOR golden bytes — the same approach that hid the M12.P2 envelope bug until a real node spoke
   * back.
   */
-class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
+class LocalNodeAccessN2cProbe extends AnyFunSuite with ScalaFutures {
 
     implicit override val patienceConfig: PatienceConfig =
         PatienceConfig(timeout = Span(60, Seconds), interval = Span(200, Millis))
@@ -67,8 +66,8 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
       "addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp"
     )
 
-    private def withProvider(test: LocalNodeProvider => Unit): Unit = {
-        val provider = LocalNodeProvider
+    private def withProvider(test: LocalNodeAccess => Unit): Unit = {
+        val provider = LocalNodeAccess
             .connect(socketPath, networkMagic, CardanoInfo.preview, submitEra)
             .futureValue
         try test(provider)
@@ -141,13 +140,12 @@ class LocalNodeProviderN2cProbe extends AnyFunSuite with ScalaFutures {
         }
     }
 
-    test("checkTransaction for an unknown hash returns NotFound via LocalTxMonitor") {
+    test("checkInMempool for an unknown hash returns false via LocalTxMonitor") {
         withProvider { p =>
             val unknown = TransactionHash.fromByteString(
               ByteString.fromArray(Array.fill[Byte](32)(0x55))
             )
-            val status = p.checkTransaction(unknown).futureValue
-            assert(status == TransactionStatus.NotFound, s"expected NotFound, got $status")
+            assert(!p.checkInMempool(unknown).futureValue)
         }
     }
 }
