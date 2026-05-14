@@ -63,6 +63,34 @@ class LocalStateQueryMessageSuite extends AnyFunSuite {
         roundTrip(MsgResult(body))
     }
 
+    test("round-trip MsgResult with a tag-bearing body (captureRawCbor must not truncate)") {
+        // Regression for #9: `captureRawCbor` used borer's `skipElement`, which is not tag-aware
+        // (`DataItem.Tag` ∉ `DataItem.Complex`) and silently truncated any tag-bearing body — e.g.
+        // a Conway `GetCurrentPParams` result, which is full of tag-30 rationals. The minimal
+        // exposing shape is a tag followed by a sibling element inside an array.
+        // body: 82 d81e820105 03  ─ [ tag30([1, 5]), uint(3) ]
+        val body = ByteString.fromArray(
+          Array[Byte](
+            0x82.toByte, // array(2)
+            0xd8.toByte,
+            0x1e,
+            0x82.toByte,
+            0x01,
+            0x05, // tag(30) [1, 5]
+            0x03 // uint(3) — the sibling the old skipElement dropped
+          )
+        )
+        roundTrip(MsgResult(body))
+    }
+
+    test("round-trip MsgQuery with a tag-bearing body") {
+        // Same #9 regression on the MsgQuery path (shares captureRawCbor).
+        val body = ByteString.fromArray(
+          Array[Byte](0xc2.toByte, 0x42, 0x01, 0x02) // tag(2) bignum, bytes(2) 0x0102
+        )
+        roundTrip(MsgQuery(body))
+    }
+
     test("round-trip MsgRelease") {
         roundTrip(MsgRelease)
     }

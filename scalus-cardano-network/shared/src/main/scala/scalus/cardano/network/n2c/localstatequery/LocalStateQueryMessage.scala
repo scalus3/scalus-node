@@ -1,6 +1,6 @@
 package scalus.cardano.network.n2c.localstatequery
 
-import io.bullet.borer.{DataItem, Decoder, Encoder, Reader, Writer}
+import io.bullet.borer.{DataItem, Decoder, Dom, Encoder, Reader, Writer}
 import scalus.cardano.ledger.OriginalCborByteArray
 import scalus.cardano.network.chainsync.Point
 import scalus.uplc.builtin.ByteString
@@ -165,18 +165,22 @@ object LocalStateQueryMessage {
         }
     }
 
-    /** Capture the raw CBOR bytes of the next data item without decoding it. Mirrors the
+    /** Capture the raw CBOR bytes of the next data item without interpreting it. Mirrors the
       * `KeepRaw[A]` decoder shape in `scalus.cardano.ledger` — see
       * https://github.com/sirthias/borer/issues/761#issuecomment-2919035884 for why the two
       * `r.dataItem()` bracketing calls are necessary (cursor only updates on pull).
       *
-      * Uses `skipElement` rather than `skipDataItem` because the query/result body is typically a
-      * complex CBOR structure (array/map) — `skipDataItem` would only consume the header.
+      * Consumes the item via `r.read[Dom.Element]()` rather than `r.skipElement()`: borer's
+      * `skipElement` is NOT tag-aware (`DataItem.Tag` is absent from `DataItem.Complex`), so for
+      * any tag-bearing body — e.g. a Conway `GetCurrentPParams` result, which is full of tag-30
+      * rationals — it under-counts the structure and the captured slice comes out truncated.
+      * `Dom.Element`'s decoder handles tags (`TaggedElem(readTag(), read[Element]())`) and every
+      * other CBOR shape, consuming exactly one complete data item; the decoded value is discarded.
       */
     private def captureRawCbor(r: Reader)(using orig: OriginalCborByteArray): ByteString = {
         r.dataItem()
         val start = r.cursor
-        r.skipElement()
+        val _ = r.read[Dom.Element]()
         val di = r.dataItem()
         val end = if di == DataItem.EndOfInput then r.input.cursor else r.cursor
         ByteString.fromArray(orig.slice(start.toInt, end.toInt))

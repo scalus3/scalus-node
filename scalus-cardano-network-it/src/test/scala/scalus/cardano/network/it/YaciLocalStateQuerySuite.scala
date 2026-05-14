@@ -105,16 +105,7 @@ class YaciLocalStateQuerySuite extends AnyFunSuite with YaciN2cAccess with Scala
         withProvider { p =>
             // yaci starts in Babbage and HFs to Conway at epoch 1 (conwayHardForkAtEpoch=1).
             // `fetchLatestParams` pins the Conway decoder, so before the HF it surfaces an
-            // EraMismatch — cancel rather than fail in that window.
-            //
-            // KNOWN ISSUE: against a live v18 node the `GetCurrentPParams` result currently
-            // surfaces an LsqError.DecodeFailure (the inner ConwayProtocolParams bytes come back
-            // empty after the envelope peel — the v18 result shape differs from what
-            // LsqQuery.QueryIfCurrent.decode assumes). The other LSQ queries (currentSlot,
-            // findUtxos) go through the same acquire/query/decode path and pass, so this is
-            // specific to the GetCurrentPParams result envelope. Tracked as a follow-up; until
-            // then this test cancels rather than fails on a decode error so the rest of the IT
-            // surface stays enforced.
+            // EraMismatch — cancel rather than fail in that narrow window.
             val result: Either[Throwable, ProtocolParams] =
                 p.fetchLatestParams.map(Right(_)).recover { case t => Left(t) }.futureValue
             result match {
@@ -125,8 +116,6 @@ class YaciLocalStateQuerySuite extends AnyFunSuite with YaciN2cAccess with Scala
                     assert(pp.protocolVersion.major >= 9, s"protocolVersion=${pp.protocolVersion}")
                 case Left(_: LsqError.EraMismatch) =>
                     cancel("yaci devnet not yet in Conway era; skipping pparams assertion")
-                case Left(_: LsqError.DecodeFailure) =>
-                    cancel("GetCurrentPParams v18 result decode is a known follow-up; see comment")
                 case Left(other) =>
                     fail(s"fetchLatestParams failed unexpectedly: $other")
             }
