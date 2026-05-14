@@ -1,6 +1,6 @@
 package scalus.cardano.network.it
 
-import com.bloxbean.cardano.yaci.test.YaciCardanoContainer
+import com.bloxbean.cardano.yaci.test.{Funding, YaciCardanoContainer}
 
 /** Shared `YaciCardanoContainer` for the N2C integration suites, configured to expose the node's
   * Node-to-Client surface over TCP.
@@ -23,12 +23,24 @@ object YaciN2cContainer {
       */
     val SocatN2cPort: Int = 3333
 
+    /** Testnet address funded at devnet startup. The funding tx lands in the first block(s) and is
+      * never spent, so it's a stable fixture both backends should agree on — used by
+      * [[YaciCrossBackupParitySuite]]. `withInitialFunding` also strengthens the container's
+      * readiness gate: it additionally waits for this address's UTxOs to be queryable.
+      */
+    val FundedAddress: String =
+        "addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp"
+
+    /** Ada topped up to [[FundedAddress]] at startup. */
+    val FundedAda: Long = 5000L
+
     lazy val container: YaciCardanoContainer = {
         val c = new YaciCardanoContainer()
         // Enable the socat n2c bridge — gated on `is.docker` in yaci-cli's SocatService, which the
         // bare image leaves false. We *are* in docker here, so this is just correcting the image.
         c.addEnv("IS_DOCKER", "true")
         c.addExposedPort(SocatN2cPort)
+        c.withInitialFunding(new Funding(FundedAddress, FundedAda))
         c.start()
         c
     }
