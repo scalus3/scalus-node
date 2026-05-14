@@ -66,7 +66,9 @@ final class LocalNodeAccess private (
         connectedSinceMillis = connectedSinceMillis,
         lastSubmittedHash = None,
         submitCount = 0L,
-        rejectCount = 0L
+        rejectCount = 0L,
+        lsqQueriesIssued = 0L,
+        ltmQueriesIssued = 0L
       )
     )
 
@@ -78,6 +80,22 @@ final class LocalNodeAccess private (
             if !diagState.compareAndSet(cur, next) then loop()
         }
         loop()
+    }
+
+    /** Issue an LSQ query, bumping `lsqQueriesIssued`. The counter advances at issue time, so a
+      * query that ultimately fails still counts — it represents wire traffic, not successes.
+      */
+    private def countedLsqQuery[A](q: LsqQuery[A]): Future[Either[LsqError, A]] = {
+        updateDiag(s => s.copy(lsqQueriesIssued = s.lsqQueriesIssued + 1L))
+        lsqDriver.query(q)
+    }
+
+    /** Issue an LTM `hasTx`, bumping `ltmQueriesIssued`. Same issue-time accounting as
+      * [[countedLsqQuery]].
+      */
+    private def countedHasTx(txHash: TransactionHash): Future[Boolean] = {
+        updateDiag(s => s.copy(ltmQueriesIssued = s.ltmQueriesIssued + 1L))
+        txMonitorDriver.hasTx(submitEra, txHash)
     }
 
     def submit(transaction: Transaction): Future[Either[SubmitError, TransactionHash]] = {
@@ -146,7 +164,7 @@ final class LocalNodeAccess private (
         }
         buildLsq match {
             case Some(mk) =>
-                withCurrentEra(era => lsqDriver.query(mk(era))).map {
+                withCurrentEra(era => countedLsqQuery(mk(era))).map {
                     case Right(utxos) => Right(utxos)
                     case Left(err) =>
                         Left(UtxoQueryError.NotSupported(query, reason = err.getMessage))
@@ -170,7 +188,7 @@ final class LocalNodeAccess private (
       * don't have a typed-error channel in `BlockchainProvider`.
       */
     private def runLsq[A](q: LsqQuery[A]): Future[A] =
-        withLsqSnapshot(lsqDriver.query(q)).flatMap(_.fold(Future.failed, Future.successful))
+        withLsqSnapshot(countedLsqQuery(q)).flatMap(_.fold(Future.failed, Future.successful))
 
     /** Acquire a snapshot, resolve the node's current HFC era via `GetCurrentEra`, then run `body`
       * against that era — all within the same `Acquired` state. Lets era-parameterised queries
@@ -180,7 +198,7 @@ final class LocalNodeAccess private (
     private def withCurrentEra[A](
         body: Int => Future[Either[LsqError, A]]
     ): Future[Either[LsqError, A]] = withLsqSnapshot {
-        lsqDriver.query(LsqQuery.GetCurrentEra).flatMap {
+        countedLsqQuery(LsqQuery.GetCurrentEra).flatMap {
             case Right(era) => body(era)
             case Left(err)  => Future.successful(Left(err))
         }
@@ -219,7 +237,7 @@ final class LocalNodeAccess private (
       */
     def checkInMempool(txHash: TransactionHash): Future[Boolean] =
         withTxMonitorSnapshot {
-            txMonitorDriver.hasTx(submitEra, txHash)
+            countedHasTx(txHash)
         }
 
     /** Single-snapshot batch override: one LTM acquire, N sequential `hasTx` queries (the LTM
@@ -234,9 +252,7 @@ final class LocalNodeAccess private (
             withTxMonitorSnapshot {
                 txHashes.foldLeft(Future.successful(Set.empty[TransactionHash])) { (acc, h) =>
                     acc.flatMap { soFar =>
-                        txMonitorDriver
-                            .hasTx(submitEra, h)
-                            .map(present => if present then soFar + h else soFar)
+                        countedHasTx(h).map(present => if present then soFar + h else soFar)
                     }
                 }
             }

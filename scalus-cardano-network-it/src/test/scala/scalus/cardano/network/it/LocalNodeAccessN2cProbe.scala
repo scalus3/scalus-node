@@ -148,4 +148,20 @@ class LocalNodeAccessN2cProbe extends AnyFunSuite with ScalaFutures {
             assert(!p.checkInMempool(unknown).futureValue)
         }
     }
+
+    test("BackupDiagnostics counts LSQ and LTM queries issued") {
+        withProvider { p =>
+            val before = p.diagnostics
+            p.currentSlot.futureValue
+            val unknown = TransactionHash.fromByteString(
+              ByteString.fromArray(Array.fill[Byte](32)(0x55))
+            )
+            p.checkInMempool(unknown).futureValue
+            val after = p.diagnostics
+            // `currentSlot` issues one LSQ query (GetChainPoint); `checkInMempool` issues one
+            // LTM hasTx. Both counters are monotonic, so `after` strictly exceeds `before`.
+            assert(after.lsqQueriesIssued > before.lsqQueriesIssued)
+            assert(after.ltmQueriesIssued > before.ltmQueriesIssued)
+        }
+    }
 }
