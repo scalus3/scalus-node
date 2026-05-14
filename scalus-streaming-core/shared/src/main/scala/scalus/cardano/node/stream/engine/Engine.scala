@@ -117,6 +117,13 @@ final class Engine(
     private val txStatusSubs =
         mutable.Map.empty[TransactionHash, mutable.Map[Long, Mailbox[TransactionStatus]]]
 
+    /** Hashes that the most recent `localNode.checkInMempoolBatch` reported as present in the local
+      * mempool. Empty when no `LocalNodeBackend` is configured or no poll has run yet. Layered on
+      * top of `TxHashIndex` — `Confirmed` and own-`Pending` win; this only contributes `Pending`
+      * for txs we did NOT submit ourselves. Mutated only on the worker.
+      */
+    private val mempoolPending = mutable.Set.empty[TransactionHash]
+
     // ------------------------------------------------------------------
     // Published atomics (lock-free reads).
     // ------------------------------------------------------------------
@@ -132,8 +139,23 @@ final class Engine(
     // ------------------------------------------------------------------
 
     def txStatus(hash: TransactionHash): Future[Option[TransactionStatus]] = submit {
-        txHashIndex.statusOf(hash)
+        txHashIndex.statusOf(hash).orElse {
+            if mempoolPending.contains(hash) then Some(TransactionStatus.Pending)
+            else None
+        }
     }
+
+    /** Status to emit on a subscription event, including the LTM-derived `mempoolPending` layer.
+      * `Confirmed` (chain) > own-`Pending` (notifySubmit) > mempool-`Pending` (LTM poll) >
+      * `NotFound`. Caller MUST be on the worker.
+      */
+    private def subscriberStatusOf(hash: TransactionHash): TransactionStatus =
+        txHashIndex.statusOf(hash) match {
+            case Some(s) => s
+            case None =>
+                if mempoolPending.contains(hash) then TransactionStatus.Pending
+                else TransactionStatus.NotFound
+        }
 
     /** Two-tier engine-local datum lookup: the in-memory [[DatumIndex]] over the volatile rollback
       * buffer first, then the persistent [[ChainStoreDatumDict]] if the configured ChainStore
@@ -262,7 +284,7 @@ final class Engine(
     ): Future[Unit] = submit {
         val bucket = txStatusSubs.getOrElseUpdate(hash, mutable.Map.empty)
         bucket.update(id, mailbox)
-        mailbox.offer(txHashIndex.statusOf(hash).getOrElse(TransactionStatus.NotFound))
+        mailbox.offer(subscriberStatusOf(hash))
     }
 
     def unregisterTxStatus(hash: TransactionHash, id: Long): Future[Unit] = submit {
@@ -300,12 +322,20 @@ final class Engine(
             events.foreach(deliverTo(sub, _))
         }
 
-        // Tx-status Confirmed for tracked hashes that appeared in this block.
+        // Tx-status Confirmed for tracked hashes that appeared in this block. Each confirmed hash
+        // also drops out of the mempool-pending cache (it just moved chain), so a stale `Pending`
+        // from the most recent LTM poll doesn't override `Confirmed` on the next subscription
+        // emission.
         block.transactionIds.foreach { h =>
+            mempoolPending -= h
             txStatusSubs.get(h).foreach { subs =>
                 subs.values.foreach(_.offer(TransactionStatus.Confirmed))
             }
         }
+
+        // Refresh the mempool-pending cache against the local node, if configured. Runs off-worker
+        // and posts back via `submit`; failures are swallowed because the next block will retry.
+        triggerMempoolPoll()
 
         // Tip fan-out.
         tipSubs.values.foreach(_.offer(block.tip))
@@ -345,10 +375,14 @@ final class Engine(
                     utxoSubs.values.foreach(deliverTo(_, UtxoEvent.RolledBack(to)))
                     rollbackBuffer.tip.foreach(t => tipSubs.values.foreach(_.offer(t)))
                     revertedHashes.foreach { h =>
-                        val newStatus =
-                            txHashIndex.statusOf(h).getOrElse(TransactionStatus.NotFound)
-                        txStatusSubs.get(h).foreach(_.values.foreach(_.offer(newStatus)))
+                        txStatusSubs
+                            .get(h)
+                            .foreach(_.values.foreach(_.offer(subscriberStatusOf(h))))
                     }
+                    // A reverted tx is typically back in the node's mempool — refresh the cache so
+                    // its status settles on `Pending` rather than the `NotFound` the line above
+                    // emits when `mempoolPending` doesn't yet know about it.
+                    triggerMempoolPoll()
                     persistence.appendSync(JournalRecord.Backward(to))
                     chainStore.foreach { store =>
                         try store.rollbackTo(to)
@@ -388,6 +422,57 @@ final class Engine(
         txHashIndex.recordOwnSubmission(hash)
         txStatusSubs.get(hash).foreach(_.values.foreach(_.offer(TransactionStatus.Pending)))
         persistence.appendSync(JournalRecord.OwnSubmitted(hash))
+    }
+
+    /** Schedule a `checkInMempoolBatch` against the configured `LocalNodeBackend` and apply the
+      * result on the worker. No-op if no local node is wired or no `txStatus` subscribers are
+      * active. Called from inside `onRollForward` after the block's own confirmations are emitted,
+      * so latency between a third-party submit and a `Pending` event is bounded by block
+      * production.
+      */
+    private def triggerMempoolPoll(): Unit = localNode match {
+        case None => ()
+        case Some(ln) =>
+            val asked = txStatusSubs.keySet.toSet
+            if asked.nonEmpty then {
+                given ExecutionContext = ln.executionContext
+                ln.checkInMempoolBatch(asked).onComplete {
+                    case Success(present) =>
+                        val _ = submit { applyMempoolPoll(asked, present) }
+                    case Failure(t) =>
+                        logger.debug(s"checkInMempoolBatch poll failed: $t")
+                }
+            }
+    }
+
+    /** Reconcile the `mempoolPending` cache with a freshly-polled `present` set. For each hash in
+      * `asked`: transition `false → true` emits `Pending` (unless already `Confirmed`); transition
+      * `true → false` emits the current `subscriberStatusOf` (which collapses to `Confirmed` /
+      * own-`Pending` / `NotFound`). Caller MUST be on the worker.
+      */
+    private def applyMempoolPoll(
+        asked: Set[TransactionHash],
+        present: Set[TransactionHash]
+    ): Unit = {
+        asked.foreach { h =>
+            val wasPending = mempoolPending.contains(h)
+            val isPending = present.contains(h)
+            // A Confirmed tx is never tracked as mempool-pending — `Confirmed` outranks `Pending`,
+            // and a real node drops confirmed txs from its mempool anyway. Skipping the set-add
+            // keeps `mempoolPending` from carrying a hash that `subscriberStatusOf` would ignore.
+            val confirmed = txHashIndex.statusOf(h).contains(TransactionStatus.Confirmed)
+            if isPending && !wasPending && !confirmed then {
+                mempoolPending += h
+                txStatusSubs
+                    .get(h)
+                    .foreach(_.values.foreach(_.offer(TransactionStatus.Pending)))
+            } else if !isPending && wasPending then {
+                mempoolPending -= h
+                txStatusSubs
+                    .get(h)
+                    .foreach(_.values.foreach(_.offer(subscriberStatusOf(h))))
+            }
+        }
     }
 
     def closeAllSubscribers(): Future[Unit] = submit {

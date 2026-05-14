@@ -1,12 +1,13 @@
 package scalus.cardano.node.stream.engine
 
 import org.scalatest.funsuite.AnyFunSuite
-import scalus.cardano.ledger.CardanoInfo
-import scalus.cardano.node.stream.{ChainPoint, ChainTip, UtxoEvent}
-import scalus.cardano.node.{UtxoQuery, UtxoSource}
+import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
+import scalus.cardano.node.stream.{ChainPoint, ChainTip, LocalNodeBackend, UtxoEvent}
+import scalus.cardano.node.{SubmitError, UtxoQuery, UtxoQueryError, UtxoSource}
+import scalus.uplc.builtin.Data
 
 import scala.concurrent.duration.*
-import scala.concurrent.Await
+import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.collection.mutable.ArrayBuffer
 
 import EngineTestFixtures.*
@@ -38,6 +39,28 @@ class EngineSuite extends AnyFunSuite {
 
     private def mkEngine(securityParam: Int = 2160): Engine =
         new Engine(ci, None, securityParam)
+
+    /** Minimal [[LocalNodeBackend]] whose mempool view is a mutable set the test controls. Only
+      * `checkInMempool` / `checkInMempoolBatch` carry behaviour; the rest fail loudly if the engine
+      * ever calls them (it shouldn't, for the tx-status path).
+      */
+    private final class FakeLocalNode(var mempool: Set[TransactionHash]) extends LocalNodeBackend {
+        def cardanoInfo: CardanoInfo = ci
+        def executionContext: ExecutionContext = ExecutionContext.global
+        def submit(transaction: Transaction): Future[Either[SubmitError, TransactionHash]] =
+            Future.failed(new UnsupportedOperationException("submit"))
+        def currentSlot: Future[SlotNo] =
+            Future.failed(new UnsupportedOperationException("currentSlot"))
+        def fetchLatestParams: Future[ProtocolParams] =
+            Future.failed(new UnsupportedOperationException("fetchLatestParams"))
+        def findUtxos(query: UtxoQuery): Future[Either[UtxoQueryError, Utxos]] =
+            Future.failed(new UnsupportedOperationException("findUtxos"))
+        def getDatum(datumHash: DataHash): Future[Option[Data]] =
+            Future.failed(new UnsupportedOperationException("getDatum"))
+        def checkInMempool(txHash: TransactionHash): Future[Boolean] =
+            Future.successful(mempool.contains(txHash))
+        def close(): Future[Unit] = Future.unit
+    }
 
     test("subscribeTip + onRollForward emits the block's ChainTip") {
         val engine = mkEngine()
@@ -190,5 +213,72 @@ class EngineSuite extends AnyFunSuite {
         // dict on the configured ChainStore still answers.
         Await.result(engine.onRollForward(block(2, tx(12))), timeout)
         assert(Await.result(engine.lookupDatum(h), timeout).contains(d))
+    }
+
+    test("LTM poll on block arrival flips a third-party tx to Pending") {
+        import scalus.cardano.node.TransactionStatus.*
+        val h = txHash(900)
+        val fake = new FakeLocalNode(mempool = Set(h))
+        val engine = new Engine(ci, None, securityParam = 2160, localNode = Some(fake))
+
+        val id = engine.nextSubscriptionId()
+        val mailbox = Mailbox.latestValue[scalus.cardano.node.TransactionStatus]()
+        Await.result(engine.registerTxStatusSubscription(id, h, mailbox), timeout)
+
+        // Block does NOT contain `h` — it stays mempool-only. The post-block LTM poll should
+        // flip the subscriber from NotFound to Pending.
+        Await.result(engine.onRollForward(block(1, tx(1))), timeout)
+
+        // First pull may coalesce to either NotFound or Pending depending on poll timing; keep
+        // pulling until Pending lands (the poll is async via the localNode's EC).
+        var status = Await.result(mailbox.pull(), timeout)
+        while status.contains(NotFound) do status = Await.result(mailbox.pull(), timeout)
+        assert(status.contains(Pending))
+    }
+
+    test("LTM poll: a tx leaving the mempool reverts the subscriber to NotFound") {
+        import scalus.cardano.node.TransactionStatus.*
+        val h = txHash(901)
+        val fake = new FakeLocalNode(mempool = Set(h))
+        val engine = new Engine(ci, None, securityParam = 2160, localNode = Some(fake))
+
+        val id = engine.nextSubscriptionId()
+        val mailbox = Mailbox.latestValue[scalus.cardano.node.TransactionStatus]()
+        Await.result(engine.registerTxStatusSubscription(id, h, mailbox), timeout)
+
+        Await.result(engine.onRollForward(block(1, tx(1))), timeout)
+        var s1 = Await.result(mailbox.pull(), timeout)
+        while s1.contains(NotFound) do s1 = Await.result(mailbox.pull(), timeout)
+        assert(s1.contains(Pending))
+
+        // Tx drops out of the mempool (TTL expiry / eviction); next block's poll reverts it.
+        fake.mempool = Set.empty
+        Await.result(engine.onRollForward(block(2, tx(2))), timeout)
+        var s2 = Await.result(mailbox.pull(), timeout)
+        while s2.contains(Pending) do s2 = Await.result(mailbox.pull(), timeout)
+        assert(s2.contains(NotFound))
+    }
+
+    test("LTM poll does not shadow Confirmed for a tx still in the node mempool") {
+        import scalus.cardano.node.TransactionStatus.*
+        val h = txHash(902)
+        // Fake keeps reporting `h` in the mempool even after it confirms — a real node would drop
+        // it, but this exercises the `confirmed` guard in applyMempoolPoll.
+        val fake = new FakeLocalNode(mempool = Set(h))
+        val engine = new Engine(ci, None, securityParam = 2160, localNode = Some(fake))
+
+        val id = engine.nextSubscriptionId()
+        val mailbox = Mailbox.latestValue[scalus.cardano.node.TransactionStatus]()
+        Await.result(engine.registerTxStatusSubscription(id, h, mailbox), timeout)
+
+        // Block DOES contain `h` — it confirms. The post-block poll still sees `h` in the fake's
+        // mempool, but the `confirmed` guard must keep the final status at Confirmed.
+        Await.result(engine.onRollForward(block(1, tx(902))), timeout)
+
+        // Give the async poll a chance to land, then assert the latest value is Confirmed and
+        // nothing downgrades it.
+        Thread.sleep(100)
+        val status = Await.result(mailbox.pull(), timeout)
+        assert(status.contains(Confirmed))
     }
 }

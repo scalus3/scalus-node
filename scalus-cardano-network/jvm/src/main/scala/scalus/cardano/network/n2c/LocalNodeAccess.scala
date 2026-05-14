@@ -222,6 +222,25 @@ final class LocalNodeAccess private (
             txMonitorDriver.hasTx(submitEra, txHash)
         }
 
+    /** Single-snapshot batch override: one LTM acquire, N sequential `hasTx` queries (the LTM
+      * driver is single-in-flight per snapshot), one release. Avoids the N×acquire/release fan-out
+      * the default trait impl would produce.
+      */
+    override def checkInMempoolBatch(
+        txHashes: Set[TransactionHash]
+    ): Future[Set[TransactionHash]] =
+        if txHashes.isEmpty then Future.successful(Set.empty)
+        else
+            withTxMonitorSnapshot {
+                txHashes.foldLeft(Future.successful(Set.empty[TransactionHash])) { (acc, h) =>
+                    acc.flatMap { soFar =>
+                        txMonitorDriver
+                            .hasTx(submitEra, h)
+                            .map(present => if present then soFar + h else soFar)
+                    }
+                }
+            }
+
     private val txMonitorGate = new AtomicReference[Future[Unit]](Future.unit)
 
     private def withTxMonitorSnapshot[A](body: => Future[A]): Future[A] = {

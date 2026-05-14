@@ -30,6 +30,27 @@ trait LocalNodeBackend {
     /** `true` iff the tx is in the local-node mempool snapshot right now. */
     def checkInMempool(txHash: TransactionHash): Future[Boolean]
 
+    /** Returns the subset of `txHashes` currently present in the local-node mempool. Default impl
+      * issues one `checkInMempool` per hash; backends that can amortise the snapshot lifecycle
+      * (e.g. one LTM acquire + N `hasTx` + release) should override.
+      *
+      * Used by the streaming engine on each block arrival to fan `Pending` events out to
+      * `subscribeTransactionStatus` consumers for txs submitted by *other* clients — the engine
+      * already tracks our own submits via `notifySubmit`.
+      */
+    def checkInMempoolBatch(
+        txHashes: Set[TransactionHash]
+    ): Future[Set[TransactionHash]] = {
+        given ExecutionContext = executionContext
+        if txHashes.isEmpty then Future.successful(Set.empty)
+        else
+            Future
+                .traverse(txHashes.toSeq) { h =>
+                    checkInMempool(h).map(present => if present then Some(h) else None)
+                }
+                .map(_.flatten.toSet)
+    }
+
     /** Tear down the underlying N2C connection + drivers. Idempotent. */
     def close(): Future[Unit]
 }
