@@ -4,20 +4,27 @@ import scalus.cardano.infra.jvm.JvmTimer
 import scalus.cardano.infra.{CancelSource, CancelToken, CancelledException, Timer}
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.infra.*
-import scalus.cardano.network.jvm.JvmUnixDomainAsyncByteChannel
+import scalus.cardano.network.jvm.{JvmAsyncByteChannel, JvmUnixDomainAsyncByteChannel}
 import scalus.cardano.network.n2c.handshake.{HandshakeDriver, NegotiatedVersion}
 
 import java.nio.file.Path
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.control.NonFatal
 
-/** JVM factory for [[NodeToClientConnection]]. Opens a Unix-domain socket at `socketPath`, runs the
-  * N2C handshake, and returns the live connection.
+/** JVM factory for [[NodeToClientConnection]]. Opens a transport to a cardano-node — a Unix-domain
+  * socket ([[connect]]) or a TCP endpoint ([[connectTcp]]) — runs the N2C handshake, and returns
+  * the live connection.
   *
   * Mirrors [[scalus.cardano.network.NodeToNodeClient]] except that:
-  *   - the transport is a Unix-domain socket (JDK 16+);
+  *   - the default transport is a Unix-domain socket (JDK 16+);
   *   - there is no keep-alive loop — N2C has no keep-alive mini-protocol;
   *   - the version table is the N2C one (`>= V16`, `[networkMagic, query]` per-version data).
+  *
+  * The TCP variant exists because some deployments front the node socket with a `socat`
+  * `TCP-LISTEN … UNIX-CONNECT` bridge — yaci-devkit does this by default on port 3333, which is how
+  * the Yaci LSQ/LTM integration suites reach the node. The N2C mini-protocols are
+  * transport-agnostic (they run over [[AsyncByteChannel]]), so the bridge is wire-identical to a
+  * direct socket connection.
   *
   * See `docs/local/design/n2c-protocol-m11.md` for the milestone scope.
   */
@@ -26,9 +33,10 @@ object NodeToClientClient {
     private val defaultLogger: scribe.Logger =
         scribe.Logger("scalus.cardano.network.n2c.NodeToClientClient")
 
-    /** Establish a Node-to-Client connection. The returned future completes once the handshake is
-      * accepted. Any failure before that point (socket error, handshake refusal, handshake timeout)
-      * fails the returned future and tears down the transient socket.
+    /** Establish a Node-to-Client connection over a Unix-domain socket. The returned future
+      * completes once the handshake is accepted. Any failure before that point (socket error,
+      * handshake refusal, handshake timeout) fails the returned future and tears down the transient
+      * socket.
       */
     def connect(
         socketPath: Path,
@@ -36,9 +44,37 @@ object NodeToClientClient {
         config: ClientConfig = ClientConfig.default,
         timer: Timer = JvmTimer.shared,
         logger: scribe.Logger = defaultLogger
+    )(using ExecutionContext): Future[NodeToClientConnection] =
+        connectVia(
+          JvmUnixDomainAsyncByteChannel.connect(socketPath),
+          networkMagic,
+          config,
+          timer,
+          logger
+        )
+
+    /** Establish a Node-to-Client connection over TCP — e.g. to a `socat` bridge fronting the node
+      * socket. Wire-identical to [[connect]] once the channel is open; only the transport differs.
+      */
+    def connectTcp(
+        host: String,
+        port: Int,
+        networkMagic: NetworkMagic,
+        config: ClientConfig = ClientConfig.default,
+        timer: Timer = JvmTimer.shared,
+        logger: scribe.Logger = defaultLogger
+    )(using ExecutionContext): Future[NodeToClientConnection] =
+        connectVia(JvmAsyncByteChannel.connect(host, port), networkMagic, config, timer, logger)
+
+    private def connectVia(
+        openChannel: Future[AsyncByteChannel],
+        networkMagic: NetworkMagic,
+        config: ClientConfig,
+        timer: Timer,
+        logger: scribe.Logger
     )(using ExecutionContext): Future[NodeToClientConnection] = {
         for
-            channel <- JvmUnixDomainAsyncByteChannel.connect(socketPath)
+            channel <- openChannel
             connection <- buildConnection(channel, networkMagic, config, timer, logger)
                 .recoverWith { case NonFatal(t) =>
                     channel.close().transformWith(_ => Future.failed(t))

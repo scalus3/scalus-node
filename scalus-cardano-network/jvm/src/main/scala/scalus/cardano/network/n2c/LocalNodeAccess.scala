@@ -281,8 +281,15 @@ final class LocalNodeAccess private (
 
 object LocalNodeAccess {
 
-    /** Connect a fresh N2C connection at `socketPath` and return a [[LocalNodeAccess]]. The caller
-      * owns lifecycle: invoke `close()` when done.
+    // `query=false` despite this facade being LSQ-backed: in N2C version-data the `query` flag
+    // does NOT enable LSQ — LSQ runs on any negotiated connection. It signals "this is a
+    // version-query probe" and makes the peer reply with `MsgQueryReply` (their full version
+    // table) instead of negotiating a connection. Setting `query=true` here breaks the handshake
+    // against a real cardano-node.
+    private val config = ClientConfig.default
+
+    /** Connect a fresh N2C connection over the Unix-domain socket at `socketPath` and return a
+      * [[LocalNodeAccess]]. The caller owns lifecycle: invoke `close()` when done.
       *
       * @param submitEra
       *   HardForkCombinator era index used in the wire envelope of `MsgSubmitTx`. Defaults to
@@ -293,35 +300,54 @@ object LocalNodeAccess {
         networkMagic: NetworkMagic,
         cardanoInfo: CardanoInfo,
         submitEra: Int = 6
-    )(using ExecutionContext): Future[LocalNodeAccess] = {
-        // `query=false` despite this facade being LSQ-backed: in N2C version-data the `query`
-        // flag does NOT enable LSQ — LSQ runs on any negotiated connection. It signals "this is a
-        // version-query probe" and makes the peer reply with `MsgQueryReply` (their full version
-        // table) instead of negotiating a connection. Setting `query=true` here breaks the
-        // handshake against a real cardano-node.
-        val config = ClientConfig.default
-        NodeToClientClient.connect(socketPath, networkMagic, config).map { conn =>
-            val submitDriver = new LocalTxSubmissionDriver(
-              conn.channel(MiniProtocolId.LocalTxSubmission),
-              conn.rootToken
-            )
-            val lsqDriver = new LocalStateQueryDriver(
-              conn.channel(MiniProtocolId.LocalStateQuery),
-              conn.rootToken
-            )
-            val txMonitorDriver = new LocalTxMonitorDriver(
-              conn.channel(MiniProtocolId.LocalTxMonitor),
-              conn.rootToken
-            )
-            new LocalNodeAccess(
-              conn,
-              submitDriver,
-              lsqDriver,
-              txMonitorDriver,
-              cardanoInfo,
-              submitEra,
-              connectedSinceMillis = System.currentTimeMillis()
-            )
-        }
+    )(using ExecutionContext): Future[LocalNodeAccess] =
+        NodeToClientClient
+            .connect(socketPath, networkMagic, config)
+            .map(fromConnection(_, cardanoInfo, submitEra))
+
+    /** Connect a fresh N2C connection over TCP — e.g. to a `socat` bridge fronting the node socket
+      * (yaci-devkit exposes one on port 3333). Otherwise identical to [[connect]].
+      */
+    def connectTcp(
+        host: String,
+        port: Int,
+        networkMagic: NetworkMagic,
+        cardanoInfo: CardanoInfo,
+        submitEra: Int = 6
+    )(using ExecutionContext): Future[LocalNodeAccess] =
+        NodeToClientClient
+            .connectTcp(host, port, networkMagic, config)
+            .map(fromConnection(_, cardanoInfo, submitEra))
+
+    /** Spawn the three N2C mini-protocol drivers over an already-handshaked connection and wrap
+      * them in a [[LocalNodeAccess]]. Shared by [[connect]] and [[connectTcp]] — the transport is
+      * already decided by the time we get here.
+      */
+    private def fromConnection(
+        conn: NodeToClientConnection,
+        cardanoInfo: CardanoInfo,
+        submitEra: Int
+    )(using ExecutionContext): LocalNodeAccess = {
+        val submitDriver = new LocalTxSubmissionDriver(
+          conn.channel(MiniProtocolId.LocalTxSubmission),
+          conn.rootToken
+        )
+        val lsqDriver = new LocalStateQueryDriver(
+          conn.channel(MiniProtocolId.LocalStateQuery),
+          conn.rootToken
+        )
+        val txMonitorDriver = new LocalTxMonitorDriver(
+          conn.channel(MiniProtocolId.LocalTxMonitor),
+          conn.rootToken
+        )
+        new LocalNodeAccess(
+          conn,
+          submitDriver,
+          lsqDriver,
+          txMonitorDriver,
+          cardanoInfo,
+          submitEra,
+          connectedSinceMillis = System.currentTimeMillis()
+        )
     }
 }

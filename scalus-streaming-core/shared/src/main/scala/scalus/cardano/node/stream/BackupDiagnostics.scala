@@ -37,9 +37,9 @@ trait BackupDiagnostics {
   *   failures (`NetworkSubmitError.ConnectionError`, `RateLimited`, peer EOF, etc.) are not counted
   *   here even when surfaced as `Left(SubmitError)` — they're operational rather than ledger-level.
   * @param lsqQueriesIssued
-  *   count of LocalStateQuery `query` calls issued since the backup connected (every
-  *   `currentSlot` / `fetchLatestParams` / `findUtxos` / internal `GetCurrentEra`). `0L` for
-  *   backups with no LSQ surface (e.g. Blockfrost).
+  *   count of LocalStateQuery `query` calls issued since the backup connected (every `currentSlot`
+  *   / `fetchLatestParams` / `findUtxos` / internal `GetCurrentEra`). `0L` for backups with no LSQ
+  *   surface (e.g. Blockfrost).
   * @param ltmQueriesIssued
   *   count of LocalTxMonitor `hasTx` calls issued since the backup connected — one per
   *   `checkInMempool` and one per hash in each `checkInMempoolBatch`. `0L` for backups with no LTM
