@@ -4,19 +4,16 @@ import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Address
-import scalus.cardano.ledger.{CardanoInfo, Utxos}
-import scalus.cardano.network.NetworkMagic
+import scalus.cardano.ledger.Utxos
 import scalus.cardano.network.n2c.LocalNodeAccess
 import scalus.cardano.node.{BlockfrostProvider, UtxoQuery, UtxoSource}
 
-import scala.annotation.tailrec
 import scala.concurrent.ExecutionContext.Implicits.global
 
 /** Tier-5 cross-backup parity IT: the same read queries against `BackupSource.LocalNode` (the N2C
   * socat bridge) and `BackupSource.Blockfrost` (yaci-store's HTTP API), both pointed at the *same*
   * yaci-devkit node. Catches silent divergence between the two backends — e.g. a decoder that
-  * agrees with golden bytes but not with what the node actually serves (cf. #9, where the LSQ
-  * pparams path was truncating tag-bearing CBOR while the golden-byte suites stayed green).
+  * agrees with hand-rolled golden bytes but not with what the node actually serves.
   *
   * Runs under `sbt scalusCardanoNetworkIt/test`. Requires Docker.
   */
@@ -34,21 +31,6 @@ class YaciCrossBackupParitySuite extends AnyFunSuite with YaciN2cAccess with Sca
     private lazy val unusedAddress: Address = Address.fromBech32(
       "addr_test1qqwpl7h3g84mhr36wpetk904p7fchx2vst0z696lxk8ujsjyruqwmlsm344gfux3nsj6njyzj3ppvrqtt36cp9xyydzqzumz82"
     )
-
-    private def connectLocalNode(): LocalNodeAccess = {
-        @tailrec
-        def go(attemptsLeft: Int): LocalNodeAccess =
-            try
-                LocalNodeAccess
-                    .connectTcp(n2cHost, n2cPort, NetworkMagic.YaciDevnet, CardanoInfo.preview)
-                    .futureValue
-            catch {
-                case _: Throwable if attemptsLeft > 1 =>
-                    Thread.sleep(500)
-                    go(attemptsLeft - 1)
-            }
-        go(attemptsLeft = 10)
-    }
 
     private def connectBlockfrost(): BlockfrostProvider =
         BlockfrostProvider

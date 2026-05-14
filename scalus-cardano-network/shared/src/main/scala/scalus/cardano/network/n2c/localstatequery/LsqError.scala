@@ -36,11 +36,4 @@ object LsqError {
       * node's encoding (rare, indicates codec drift) or the wire payload is malformed.
       */
     final case class DecodeFailure(reason: String) extends LsqError(s"LSQ decode failure: $reason")
-
-    /** Reserved for a future Byron-era guard — not produced by the current driver because every
-      * `QueryIfCurrent` carries an explicit `era: Int` and the Byron era only supports
-      * `GetUpdateInterfaceState`, which we don't expose. Kept in the ADT so a `case _` default in
-      * future query result codecs doesn't silently widen.
-      */
-    final case class UnsupportedEra(eraTag: Int) extends LsqError(s"LSQ unsupported era: $eraTag")
 }

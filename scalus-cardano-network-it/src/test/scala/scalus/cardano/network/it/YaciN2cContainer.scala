@@ -1,6 +1,13 @@
 package scalus.cardano.network.it
 
 import com.bloxbean.cardano.yaci.test.{Funding, YaciCardanoContainer}
+import scalus.cardano.ledger.CardanoInfo
+import scalus.cardano.network.NetworkMagic
+import scalus.cardano.network.n2c.LocalNodeAccess
+
+import scala.annotation.tailrec
+import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.duration.*
 
 /** Shared `YaciCardanoContainer` for the N2C integration suites, configured to expose the node's
   * Node-to-Client surface over TCP.
@@ -46,11 +53,32 @@ object YaciN2cContainer {
     }
 }
 
-/** Mix-in giving N2C suites the host/port of the socat n2c bridge. */
+/** Mix-in giving N2C suites the host/port of the socat n2c bridge and a connect helper. */
 trait YaciN2cAccess {
 
     protected def n2cHost: String = YaciN2cContainer.container.getHost
 
     protected def n2cPort: Int =
         YaciN2cContainer.container.getMappedPort(YaciN2cContainer.SocatN2cPort)
+
+    /** Open a [[LocalNodeAccess]] over the socat bridge, retrying briefly: the bridge can lag the
+      * container's HTTP wait strategy by a beat (both fire off the same `ClusterStarted` event,
+      * order unspecified).
+      */
+    protected def connectLocalNode()(using ExecutionContext): LocalNodeAccess = {
+        @tailrec
+        def go(attemptsLeft: Int): LocalNodeAccess =
+            try
+                Await.result(
+                  LocalNodeAccess
+                      .connectTcp(n2cHost, n2cPort, NetworkMagic.YaciDevnet, CardanoInfo.preview),
+                  30.seconds
+                )
+            catch {
+                case _: Throwable if attemptsLeft > 1 =>
+                    Thread.sleep(500)
+                    go(attemptsLeft - 1)
+            }
+        go(attemptsLeft = 10)
+    }
 }

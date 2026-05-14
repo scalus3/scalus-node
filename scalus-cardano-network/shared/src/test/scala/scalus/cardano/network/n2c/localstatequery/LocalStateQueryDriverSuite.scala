@@ -3,15 +3,13 @@ package scalus.cardano.network.n2c.localstatequery
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
-import scalus.cardano.infra.{CancelSource, CancelToken}
+import scalus.cardano.infra.CancelSource
 import scalus.cardano.ledger.OriginalCborByteArray
-import scalus.cardano.network.infra.MiniProtocolBytes
+import scalus.cardano.network.infra.ScriptedMiniProtocolBytes
 import scalus.cardano.network.n2c.localstatequery.LocalStateQueryMessage.*
-import scalus.serialization.cbor.Cbor as ScalusCbor
 import scalus.uplc.builtin.ByteString
 
-import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.ExecutionContext
 
 class LocalStateQueryDriverSuite extends AnyFunSuite with ScalaFutures {
 
@@ -20,40 +18,7 @@ class LocalStateQueryDriverSuite extends AnyFunSuite with ScalaFutures {
 
     private given ExecutionContext = ExecutionContext.global
 
-    /** Scripted bytes handle — same pattern as `LocalTxSubmissionDriverSuite.ScriptedBytes`. */
-    private final class ScriptedBytes extends MiniProtocolBytes {
-        private val lock = new AnyRef
-        private val inbound = mutable.ArrayDeque.empty[Option[ByteString]]
-        private var pending: Option[Promise[Option[ByteString]]] = None
-        val sentOutbound: mutable.ArrayBuffer[ByteString] = mutable.ArrayBuffer.empty
-
-        def receive(cancel: CancelToken = CancelToken.never): Future[Option[ByteString]] =
-            lock.synchronized {
-                if inbound.nonEmpty then Future.successful(inbound.removeHead())
-                else {
-                    val p = Promise[Option[ByteString]]()
-                    pending = Some(p)
-                    p.future
-                }
-            }
-
-        def send(message: ByteString, cancel: CancelToken = CancelToken.never): Future[Unit] =
-            lock.synchronized {
-                sentOutbound += message
-                Future.unit
-            }
-
-        def stage(reply: LocalStateQueryMessage): Unit = lock.synchronized {
-            val payload = Some(ByteString.unsafeFromArray(ScalusCbor.encode(reply)))
-            pending match {
-                case Some(p) =>
-                    pending = None
-                    val _ = p.trySuccess(payload)
-                case None =>
-                    inbound.append(payload)
-            }
-        }
-    }
+    private type ScriptedBytes = ScriptedMiniProtocolBytes[LocalStateQueryMessage]
 
     private def newDriver(handle: ScriptedBytes): LocalStateQueryDriver = {
         val rootScope = CancelSource()

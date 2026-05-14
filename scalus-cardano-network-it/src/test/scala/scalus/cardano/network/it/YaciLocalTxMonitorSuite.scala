@@ -3,12 +3,10 @@ package scalus.cardano.network.it
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
-import scalus.cardano.ledger.{CardanoInfo, TransactionHash}
-import scalus.cardano.network.NetworkMagic
+import scalus.cardano.ledger.TransactionHash
 import scalus.cardano.network.n2c.LocalNodeAccess
 import scalus.uplc.builtin.ByteString
 
-import scala.annotation.tailrec
 import scala.concurrent.ExecutionContext.Implicits.global
 
 /** End-to-end LocalTxMonitor IT against a live cardano-node, reached through yaci-devkit's socat
@@ -23,23 +21,8 @@ class YaciLocalTxMonitorSuite extends AnyFunSuite with YaciN2cAccess with ScalaF
     implicit override val patienceConfig: PatienceConfig =
         PatienceConfig(timeout = Span(60, Seconds), interval = Span(200, Millis))
 
-    private def connect(): LocalNodeAccess = {
-        @tailrec
-        def go(attemptsLeft: Int): LocalNodeAccess =
-            try
-                LocalNodeAccess
-                    .connectTcp(n2cHost, n2cPort, NetworkMagic.YaciDevnet, CardanoInfo.preview)
-                    .futureValue
-            catch {
-                case _: Throwable if attemptsLeft > 1 =>
-                    Thread.sleep(500)
-                    go(attemptsLeft - 1)
-            }
-        go(attemptsLeft = 10)
-    }
-
     private def withProvider(test: LocalNodeAccess => Unit): Unit = {
-        val provider = connect()
+        val provider = connectLocalNode()
         try test(provider)
         finally provider.close().futureValue
     }

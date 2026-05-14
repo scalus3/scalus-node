@@ -139,23 +139,24 @@ final class Engine(
     // ------------------------------------------------------------------
 
     def txStatus(hash: TransactionHash): Future[Option[TransactionStatus]] = submit {
-        txHashIndex.statusOf(hash).orElse {
-            if mempoolPending.contains(hash) then Some(TransactionStatus.Pending)
-            else None
-        }
+        engineKnownStatus(hash)
     }
 
-    /** Status to emit on a subscription event, including the LTM-derived `mempoolPending` layer.
-      * `Confirmed` (chain) > own-`Pending` (notifySubmit) > mempool-`Pending` (LTM poll) >
-      * `NotFound`. Caller MUST be on the worker.
+    /** Status the engine itself can answer for `hash`, in precedence order: `Confirmed` from the
+      * chain index, own-`Pending` from `notifySubmit`, mempool-`Pending` from the latest LTM poll.
+      * `None` means the engine doesn't know — `txStatus` callers fall through to a backup. Caller
+      * MUST be on the worker.
+      */
+    private def engineKnownStatus(hash: TransactionHash): Option[TransactionStatus] =
+        txHashIndex
+            .statusOf(hash)
+            .orElse(Option.when(mempoolPending.contains(hash))(TransactionStatus.Pending))
+
+    /** Status to emit on a subscription event — [[engineKnownStatus]] collapsed to a concrete value
+      * (`None` ⇒ `NotFound`). Caller MUST be on the worker.
       */
     private def subscriberStatusOf(hash: TransactionHash): TransactionStatus =
-        txHashIndex.statusOf(hash) match {
-            case Some(s) => s
-            case None =>
-                if mempoolPending.contains(hash) then TransactionStatus.Pending
-                else TransactionStatus.NotFound
-        }
+        engineKnownStatus(hash).getOrElse(TransactionStatus.NotFound)
 
     /** Two-tier engine-local datum lookup: the in-memory [[DatumIndex]] over the volatile rollback
       * buffer first, then the persistent [[ChainStoreDatumDict]] if the configured ChainStore
@@ -290,7 +291,12 @@ final class Engine(
     def unregisterTxStatus(hash: TransactionHash, id: Long): Future[Unit] = submit {
         txStatusSubs.get(hash).foreach { bucket =>
             bucket.remove(id)
-            if bucket.isEmpty then txStatusSubs.remove(hash)
+            if bucket.isEmpty then {
+                txStatusSubs.remove(hash)
+                // No subscriber left for this hash — drop its mempool-pending entry too, otherwise
+                // it lingers forever (the next poll only `asked`s for hashes still in txStatusSubs).
+                mempoolPending.remove(hash)
+            }
         }
     }
 
@@ -407,6 +413,7 @@ final class Engine(
                 utxoSubs.clear()
                 tipSubs.clear()
                 txStatusSubs.clear()
+                mempoolPending.clear()
                 paramsSubs.clear()
                 byKey.clear()
                 datumIndex.clear()
@@ -426,23 +433,21 @@ final class Engine(
 
     /** Schedule a `checkInMempoolBatch` against the configured `LocalNodeBackend` and apply the
       * result on the worker. No-op if no local node is wired or no `txStatus` subscribers are
-      * active. Called from inside `onRollForward` after the block's own confirmations are emitted,
-      * so latency between a third-party submit and a `Pending` event is bounded by block
-      * production.
+      * active. Called from `onRollForward` (after the block's own confirmations are emitted) and
+      * from `onRollBackward`, so latency between a third-party submit and a `Pending` event is
+      * bounded by block production.
       */
     private def triggerMempoolPoll(): Unit = localNode match {
-        case None => ()
-        case Some(ln) =>
+        case Some(ln) if txStatusSubs.nonEmpty =>
             val asked = txStatusSubs.keySet.toSet
-            if asked.nonEmpty then {
-                given ExecutionContext = ln.executionContext
-                ln.checkInMempoolBatch(asked).onComplete {
-                    case Success(present) =>
-                        val _ = submit { applyMempoolPoll(asked, present) }
-                    case Failure(t) =>
-                        logger.debug(s"checkInMempoolBatch poll failed: $t")
-                }
+            given ExecutionContext = ln.executionContext
+            ln.checkInMempoolBatch(asked).onComplete {
+                case Success(present) =>
+                    val _ = submit { applyMempoolPoll(asked, present) }
+                case Failure(t) =>
+                    logger.debug(s"checkInMempoolBatch poll failed: $t")
             }
+        case _ => ()
     }
 
     /** Reconcile the `mempoolPending` cache with a freshly-polled `present` set. For each hash in
@@ -457,15 +462,16 @@ final class Engine(
         asked.foreach { h =>
             val wasPending = mempoolPending.contains(h)
             val isPending = present.contains(h)
-            // A Confirmed tx is never tracked as mempool-pending — `Confirmed` outranks `Pending`,
-            // and a real node drops confirmed txs from its mempool anyway. Skipping the set-add
-            // keeps `mempoolPending` from carrying a hash that `subscriberStatusOf` would ignore.
-            val confirmed = txHashIndex.statusOf(h).contains(TransactionStatus.Confirmed)
-            if isPending && !wasPending && !confirmed then {
-                mempoolPending += h
-                txStatusSubs
-                    .get(h)
-                    .foreach(_.values.foreach(_.offer(TransactionStatus.Pending)))
+            if isPending && !wasPending then {
+                // A Confirmed tx is never tracked as mempool-pending — `Confirmed` outranks
+                // `Pending`, and a real node drops confirmed txs from its mempool anyway. Skipping
+                // the set-add keeps `mempoolPending` free of hashes `subscriberStatusOf` ignores.
+                if !txHashIndex.statusOf(h).contains(TransactionStatus.Confirmed) then {
+                    mempoolPending += h
+                    txStatusSubs
+                        .get(h)
+                        .foreach(_.values.foreach(_.offer(TransactionStatus.Pending)))
+                }
             } else if !isPending && wasPending then {
                 mempoolPending -= h
                 txStatusSubs
@@ -484,6 +490,7 @@ final class Engine(
         tipSubs.clear()
         paramsSubs.clear()
         txStatusSubs.clear()
+        mempoolPending.clear()
         byKey.clear()
     }
 
@@ -511,6 +518,7 @@ final class Engine(
         tipSubs.clear()
         paramsSubs.clear()
         txStatusSubs.clear()
+        mempoolPending.clear()
         byKey.clear()
     }
 

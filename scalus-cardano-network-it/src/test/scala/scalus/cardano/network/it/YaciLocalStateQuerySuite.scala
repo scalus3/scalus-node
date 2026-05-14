@@ -4,14 +4,12 @@ import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.address.Address
-import scalus.cardano.ledger.{CardanoInfo, ProtocolParams, TransactionHash, TransactionInput}
-import scalus.cardano.network.NetworkMagic
+import scalus.cardano.ledger.{ProtocolParams, TransactionHash, TransactionInput}
 import scalus.cardano.network.n2c.LocalNodeAccess
 import scalus.cardano.network.n2c.localstatequery.LsqError
 import scalus.cardano.node.{UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.uplc.builtin.ByteString
 
-import scala.annotation.tailrec
 import scala.concurrent.ExecutionContext.Implicits.global
 
 /** End-to-end LocalStateQuery IT against a live cardano-node, reached through yaci-devkit's socat
@@ -31,26 +29,8 @@ class YaciLocalStateQuerySuite extends AnyFunSuite with YaciN2cAccess with Scala
       "addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp"
     )
 
-    /** Connect with a short retry: the socat bridge can lag the container's HTTP wait strategy by
-      * a beat (both fire off the same `ClusterStarted` event, order unspecified).
-      */
-    private def connect(): LocalNodeAccess = {
-        @tailrec
-        def go(attemptsLeft: Int): LocalNodeAccess =
-            try
-                LocalNodeAccess
-                    .connectTcp(n2cHost, n2cPort, NetworkMagic.YaciDevnet, CardanoInfo.preview)
-                    .futureValue
-            catch {
-                case _: Throwable if attemptsLeft > 1 =>
-                    Thread.sleep(500)
-                    go(attemptsLeft - 1)
-            }
-        go(attemptsLeft = 10)
-    }
-
     private def withProvider(test: LocalNodeAccess => Unit): Unit = {
-        val provider = connect()
+        val provider = connectLocalNode()
         try test(provider)
         finally provider.close().futureValue
     }
