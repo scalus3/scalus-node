@@ -1,6 +1,6 @@
 package scalus.cardano.node.stream.engine
 
-import scalus.cardano.ledger.{DataHash, TransactionInput, TransactionOutput, Utxos}
+import scalus.cardano.ledger.{DataHash, TransactionHash, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.node.UtxoQuery
 import scalus.cardano.node.stream.{ChainPoint, ChainTip}
 import scalus.cardano.node.stream.engine.replay.ReplayError
@@ -115,6 +115,31 @@ trait ChainStoreDatumDict { self: ChainStore =>
       * the configured backup.
       */
     def getDatumFromStore(hash: DataHash): Option[Data]
+}
+
+/** Optional mixin for [[ChainStore]] backends that can also persist the engine's `ownSubmissions`
+  * set — the hashes of transactions *this app* submitted and is still tracking for `Pending`.
+  *
+  * This is the one piece of warm-restart state that is not chain data, so it has no natural home in
+  * the block / UTxO keyspaces. A `ChainStore` that implements this trait can serve as the engine's
+  * *sole* persistence backend in Heavy-mode deployments (via
+  * [[scalus.cardano.node.stream.engine.persistence.ChainStorePersistenceStore]]) — everything else
+  * the engine needs to warm-restart (tip, block history) the store already holds. A `ChainStore`
+  * that does not implement it still works for chain queries; the deployment then pairs it with a
+  * file-backed `EnginePersistenceStore` as before.
+  *
+  * All three methods are called only from the engine worker thread — no thread-safety burden.
+  */
+trait ChainStoreOwnSubmissions { self: ChainStore =>
+
+    /** Every currently-persisted own-submission hash. */
+    def ownSubmissions: Set[TransactionHash]
+
+    /** Record `hash` as an own submission. Idempotent. */
+    def putOwnSubmission(hash: TransactionHash): Unit
+
+    /** Forget `hash`. No-op if it was never recorded. */
+    def deleteOwnSubmission(hash: TransactionHash): Unit
 }
 
 object ChainStore {

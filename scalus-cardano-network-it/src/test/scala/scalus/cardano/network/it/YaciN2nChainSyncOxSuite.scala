@@ -7,7 +7,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.node.stream.ox.OxBlockchainStreamProvider
-import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StorageProfile, StreamProviderConfig}
 import scalus.testing.yaci.YaciDevKit
 
 import scala.concurrent.ExecutionContext
@@ -35,8 +35,9 @@ class YaciN2nChainSyncOxSuite
           cardanoInfo = CardanoInfo.preview,
           chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
           backup = BackupSource.NoBackup,
-          enginePersistence =
-              scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          storage = StorageProfile.Light(
+            scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          )
         )
 
         supervised {

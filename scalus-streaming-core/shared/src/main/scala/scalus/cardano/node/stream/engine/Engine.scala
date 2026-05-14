@@ -134,6 +134,14 @@ final class Engine(
     def currentTip: Option[ChainTip] = tipRef.get
     def latestParams: ProtocolParams = paramsRef.get
 
+    /** Where chain-sync should resume from at start-up. The engine's own persisted tip wins;
+      * failing that — a cold engine backed by a bootstrapped [[ChainStore]] (e.g. after a Mithril
+      * restore) — the ChainStore's tip is the resume point, so the engine picks up the restored
+      * history instead of jumping to the live network tip. `None` ⇒ no prior state ⇒ start from the
+      * live tip. Read once during provider construction, before the chain-sync loop starts.
+      */
+    def resumeTip: Option[ChainTip] = currentTip.orElse(chainStore.flatMap(_.tip))
+
     // ------------------------------------------------------------------
     // EC-gated snapshot accessors (read-only; no mutation).
     // ------------------------------------------------------------------

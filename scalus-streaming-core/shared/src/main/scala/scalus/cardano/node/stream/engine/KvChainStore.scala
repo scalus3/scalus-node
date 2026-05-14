@@ -21,7 +21,8 @@ import scala.collection.mutable
 final class KvChainStore(kv: KvStore)
     extends ChainStore
     with ChainStoreUtxoSet
-    with ChainStoreDatumDict {
+    with ChainStoreDatumDict
+    with ChainStoreOwnSubmissions {
 
     import KvChainStore.*
     import KvChainStore.given
@@ -82,7 +83,7 @@ final class KvChainStore(kv: KvStore)
                 addedBuffer += (input -> output)
                 writes += KvStore.Put(utxoKey(input), encodeCborBs(output))
                 utxoKeysOf(input, output).foreach { k =>
-                    writes += KvStore.Put(utxoByKeyKey(k, input), UtxoByKeySentinel)
+                    writes += KvStore.Put(utxoByKeyKey(k, input), PresenceSentinel)
                 }
             }
         }
@@ -124,7 +125,7 @@ final class KvChainStore(kv: KvStore)
             rev.removed.foreach { (input, output) =>
                 writes += KvStore.Put(utxoKey(input), encodeCborBs(output))
                 utxoKeysOf(input, output).foreach { k =>
-                    writes += KvStore.Put(utxoByKeyKey(k, input), UtxoByKeySentinel)
+                    writes += KvStore.Put(utxoByKeyKey(k, input), PresenceSentinel)
                 }
             }
             writes += KvStore.Delete(deltaK)
@@ -216,7 +217,7 @@ final class KvChainStore(kv: KvStore)
         utxos.foreach { (input, output) =>
             buf += KvStore.Put(utxoKey(input), encodeCborBs(output))
             utxoKeysOf(input, output).foreach { k =>
-                buf += KvStore.Put(utxoByKeyKey(k, input), UtxoByKeySentinel)
+                buf += KvStore.Put(utxoByKeyKey(k, input), PresenceSentinel)
             }
             if buf.size >= KvChainStore.RestoreBatchSize then {
                 kv.batch(buf.toSeq)
@@ -249,6 +250,23 @@ final class KvChainStore(kv: KvStore)
 
     def getDatumFromStore(hash: DataHash): Option[Data] =
         kv.get(datumKey(hash)).map(bs => Cbor.decode(bs.bytes).to[Data].value)
+
+    // ------------------------------------------------------------------
+    // ChainStoreOwnSubmissions
+    // ------------------------------------------------------------------
+
+    def ownSubmissions: Set[TransactionHash] =
+        kv.rangeScan(
+          ByteString.unsafeFromArray(Array[Byte](OwnSubmissionsPrefix)),
+          keyspaceEnd(OwnSubmissionsPrefix)
+        ).map((k, _) => txHashFromOwnSubmissionKey(k))
+            .toSet
+
+    def putOwnSubmission(hash: TransactionHash): Unit =
+        kv.batch(Seq(KvStore.Put(ownSubmissionKey(hash), PresenceSentinel)))
+
+    def deleteOwnSubmission(hash: TransactionHash): Unit =
+        kv.batch(Seq(KvStore.Delete(ownSubmissionKey(hash))))
 
     def tip: Option[ChainTip] = kv.get(tipKey).map(decodeTip)
 
@@ -284,6 +302,7 @@ object KvChainStore {
     private val UtxoByKeyPrefix: Byte = 0x05
     private val DeltaPrefix: Byte = 0x06
     private val DatumPrefix: Byte = 0x07
+    private val OwnSubmissionsPrefix: Byte = 0x08
 
     /** Cap on the number of [[KvStore.Write]] entries held in-heap at any moment during
       * [[KvChainStore.restoreUtxoSet]]. 1024 is a compromise: small enough that a mainnet restore
@@ -292,11 +311,11 @@ object KvChainStore {
       */
     private[engine] val RestoreBatchSize: Int = 1024
 
-    /** Sentinel value for utxo-by-key entries. The entries carry their meaning in the key; the
-      * value is unused. Using a distinctive byte (0x01) makes accidental raw reads obviously
-      * non-empty without costing storage.
+    /** Sentinel value for keyspaces whose entries carry their meaning entirely in the key (the
+      * `utxo-by-key` index, the `own-submissions` set). The value is unused; a distinctive byte
+      * (0x01) makes accidental raw reads obviously non-empty without costing storage.
       */
-    private[engine] val UtxoByKeySentinel: ByteString =
+    private[engine] val PresenceSentinel: ByteString =
         ByteString.unsafeFromArray(Array[Byte](0x01))
 
     extension (a: Array[Byte]) private[engine] def asBs: ByteString = ByteString.unsafeFromArray(a)
@@ -428,6 +447,23 @@ object KvChainStore {
         buf(0) = DatumPrefix
         System.arraycopy(hashBytes, 0, buf, 1, hashBytes.length)
         ByteString.unsafeFromArray(buf)
+    }
+
+    /** Key for an own-submission entry — `<OwnSubmissionsPrefix> <tx-hash-cbor>`. CBOR-encoded for
+      * the same reason `utxoKey` is: it round-trips through the type's borer codec rather than
+      * assuming a raw-bytes accessor.
+      */
+    private[engine] def ownSubmissionKey(hash: TransactionHash): ByteString =
+        prefixedCbor(OwnSubmissionsPrefix, Cbor.encode(hash).toByteArray)
+
+    /** Inverse of [[ownSubmissionKey]]: strip the prefix byte and decode the tx hash. */
+    private[engine] def txHashFromOwnSubmissionKey(key: ByteString): TransactionHash = {
+        val raw = key.bytes
+        require(
+          raw.length > 1 && raw(0) == OwnSubmissionsPrefix,
+          "not an own-submission key"
+        )
+        Cbor.decode(java.util.Arrays.copyOfRange(raw, 1, raw.length)).to[TransactionHash].value
     }
 
     /** Return the smallest ByteString strictly greater than `bs` — used as an exclusive upper bound

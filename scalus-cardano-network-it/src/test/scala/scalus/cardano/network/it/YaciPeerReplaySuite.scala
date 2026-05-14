@@ -11,7 +11,7 @@ import scalus.cardano.network.NetworkMagic
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.stream.engine.replay.ReplayError
 import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
-import scalus.cardano.node.stream.{BackupSource, ChainPoint, ChainSyncSource, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSource, ChainPoint, ChainSyncSource, StorageProfile, StreamProviderConfig}
 import scalus.testing.yaci.YaciDevKit
 
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
@@ -66,8 +66,9 @@ class YaciPeerReplaySuite
               cardanoInfo = CardanoInfo.preview,
               chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
               backup = BackupSource.NoBackup,
-              enginePersistence =
-                  scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              storage = StorageProfile.Light(
+                scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              )
             )
 
             for {
@@ -137,8 +138,9 @@ class YaciPeerReplaySuite
               cardanoInfo = CardanoInfo.preview,
               chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
               backup = BackupSource.NoBackup,
-              enginePersistence =
-                  scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              storage = StorageProfile.Light(
+                scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              )
             )
 
             val runLoop: IO[Unit] =

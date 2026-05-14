@@ -9,7 +9,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.{ClientConfig, NetworkMagic, NodeToNodeClient}
 import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
-import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StorageProfile, StreamProviderConfig}
 
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import scala.concurrent.ExecutionContext
@@ -82,8 +82,9 @@ class PreviewRelaySmokeSuite extends AnyFunSuite with ScalaFutures {
           cardanoInfo = CardanoInfo.preview,
           chainSync = ChainSyncSource.N2N(relayHost, relayPort, NetworkMagic.Preview.value),
           backup = BackupSource.NoBackup,
-          enginePersistence =
-              scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          storage = StorageProfile.Light(
+            scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          )
         )
 
         // Preview blocks every ~20s on average. Four minutes is enough for a handful of tips

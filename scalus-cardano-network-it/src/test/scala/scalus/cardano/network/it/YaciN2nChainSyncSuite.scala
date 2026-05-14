@@ -9,7 +9,7 @@ import org.scalatest.time.{Millis, Seconds, Span}
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.NetworkMagic
 import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
-import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSource, ChainSyncSource, StorageProfile, StreamProviderConfig}
 import scalus.testing.yaci.YaciDevKit
 
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
@@ -54,8 +54,9 @@ class YaciN2nChainSyncSuite
               cardanoInfo = CardanoInfo.preview, // protocol-params shape; slot config unused here
               chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
               backup = BackupSource.NoBackup,
-              enginePersistence =
-                  scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              storage = StorageProfile.Light(
+                scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              )
             )
 
             // Capture tips into an atomic list so we can assert advancement after the stream
@@ -122,8 +123,9 @@ class YaciN2nChainSyncSuite
               cardanoInfo = CardanoInfo.preview,
               chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
               backup = BackupSource.NoBackup,
-              enginePersistence =
-                  scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              storage = StorageProfile.Light(
+                scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+              )
             )
 
             val tipCount = new AtomicLong(0L)

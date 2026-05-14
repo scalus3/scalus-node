@@ -24,6 +24,7 @@ import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
 import scalus.cardano.node.stream.{
     BackupSource,
     ChainSyncSource,
+    StorageProfile,
     StreamProviderConfig,
     SubscriptionOptions,
     UtxoEvent,
@@ -110,8 +111,9 @@ class YaciN2nBackupSeedSuite
           cardanoInfo = CardanoInfo.preview,
           chainSync = ChainSyncSource.N2N(host, port, NetworkMagic.YaciDevnet.value),
           backup = BackupSource.Custom(customBackup),
-          enginePersistence =
-              scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          storage = StorageProfile.Light(
+            scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+          )
         )
 
         val firstEvent = new AtomicReference[Option[UtxoEvent]](None)

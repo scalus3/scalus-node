@@ -7,10 +7,10 @@ import scalus.cardano.network.{ChainApplier, ClientConfig, NetworkMagic, NodeToN
 import scalus.cardano.network.n2c.{N2cChainApplier, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StorageProfile, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
-import scalus.cardano.node.stream.engine.persistence.{EnginePersistenceStore, FileEnginePersistenceStore}
+import scalus.cardano.node.stream.engine.persistence.{ChainStorePersistenceStore, EnginePersistenceStore, FileEnginePersistenceStore}
 import scalus.cardano.node.stream.engine.replay.ReplaySource
 
 import Fs2ScalusAsyncStream.{IOStream, given}
@@ -57,7 +57,7 @@ object Fs2BlockchainStreamProvider {
             case ChainSyncSource.Synthetic =>
                 for {
                     slots <- buildBackup(config.backup, config.cardanoInfo)
-                    _ <- bootstrapIfNeeded(config, persistence)
+                    _ <- bootstrapIfNeeded(config)
                     engine <- buildEngine(
                       config,
                       slots,
@@ -80,38 +80,38 @@ object Fs2BlockchainStreamProvider {
       * milestones*).
       */
     private def bootstrapIfNeeded(
-        config: StreamProviderConfig,
-        persistence: EnginePersistenceStore
+        config: StreamProviderConfig
     )(using ExecutionContext): IO[Unit] = config.bootstrap match {
-        case None => IO.unit
+        case None         => IO.unit
         case Some(source) =>
-            IO.fromFuture(IO(persistence.load())).flatMap { persisted =>
-                val warmTip = persisted.flatMap(_.snapshot.flatMap(_.tip))
-                if warmTip.isDefined then IO.unit
-                else {
-                    // StreamProviderConfig's `require` enforces `bootstrap ⇒ chainStore.isDefined`,
-                    // so the .get is safe: a malformed config can't reach this point.
-                    val store = config.chainStore.get
-                    IO.fromFuture(
-                      IO(
-                        new scalus.cardano.node.stream.engine.snapshot.ChainStoreRestorer(store)
-                            .restore(source)
-                      )
-                    ).void
-                }
-            }
+            // `config.chainStore.get` is safe: `bootstrap` is a field of `StorageProfile.Heavy`,
+            // which always carries a `chainStore`. `SnapshotBootstrap` only restores into the
+            // ChainStore; the engine picks up the restored tip via `Engine.resumeTip` (no redundant
+            // engine snapshot to keep in sync).
+            IO.fromFuture(
+              IO(
+                scalus.cardano.node.stream.engine.snapshot.SnapshotBootstrap.run(
+                  source,
+                  config.chainStore.get
+                )
+              )
+            )
     }
 
-    /** Resolve `config.enginePersistence`: an explicit value wins; `null` falls back to a
-      * file-backed store named after `config.appId`. Users who want Cold-restart semantics pass
-      * `EnginePersistenceStore.noop` explicitly (the canonical test/demo pattern).
+    /** Resolve the engine-persistence backend from `config.storage`. `Light` → the explicit
+      * `enginePersistence` if set, else a file-backed store named after `config.appId`; `Heavy` →
+      * the ChainStore itself, wrapped as a [[ChainStorePersistenceStore]] (the ChainStore is the
+      * single Heavy-mode persistence backend).
       */
     private def resolvePersistence(
         config: StreamProviderConfig
     )(using ExecutionContext): EnginePersistenceStore =
-        Option(config.enginePersistence).getOrElse(
-          FileEnginePersistenceStore.fileForApp(config.appId)
-        )
+        config.storage match {
+            case StorageProfile.Light(eng) =>
+                Option(eng).getOrElse(FileEnginePersistenceStore.fileForApp(config.appId))
+            case StorageProfile.Heavy(cs, _) =>
+                new ChainStorePersistenceStore(cs, config.appId, networkMagicFor(config))
+        }
 
     /** Load any persisted state and either rebuild the engine from it or construct a cold one. The
       * returned engine is ready for subscriber registration before chain-sync starts.
@@ -198,7 +198,7 @@ object Fs2BlockchainStreamProvider {
     )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
         for {
             slots <- buildBackup(config.backup, config.cardanoInfo)
-            _ <- bootstrapIfNeeded(config, persistence)
+            _ <- bootstrapIfNeeded(config)
             fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
             engine <- buildEngine(config, slots, persistence, fallbacks)
             conn <- IO.fromFuture(
@@ -211,7 +211,7 @@ object Fs2BlockchainStreamProvider {
                 )
               )
             )
-            startFrom = engine.currentTip match {
+            startFrom = engine.resumeTip match {
                 case Some(tip) => StartFrom.At(tip.point)
                 case None      => StartFrom.Tip
             }
@@ -257,7 +257,7 @@ object Fs2BlockchainStreamProvider {
     )(using Dispatcher[IO], ExecutionContext): IO[Fs2BlockchainStreamProvider] =
         for {
             slots <- buildBackup(config.backup, config.cardanoInfo)
-            _ <- bootstrapIfNeeded(config, persistence)
+            _ <- bootstrapIfNeeded(config)
             engine <- buildEngine(config, slots, persistence, config.fallbackReplaySources)
             conn <- IO.fromFuture(
               IO(
@@ -267,7 +267,7 @@ object Fs2BlockchainStreamProvider {
                 )
               )
             )
-            startFrom = engine.currentTip match {
+            startFrom = engine.resumeTip match {
                 case Some(tip) => StartFrom.At(tip.point)
                 case None      => StartFrom.Tip
             }

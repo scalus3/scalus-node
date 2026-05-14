@@ -6,10 +6,10 @@ import scalus.cardano.network.{ChainApplier, ChainApplierHandle, ClientConfig, N
 import scalus.cardano.network.n2c.{N2cChainApplier, N2cChainApplierHandle, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StorageProfile, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
-import scalus.cardano.node.stream.engine.persistence.{EnginePersistenceStore, FileEnginePersistenceStore}
+import scalus.cardano.node.stream.engine.persistence.{ChainStorePersistenceStore, EnginePersistenceStore, FileEnginePersistenceStore}
 import scalus.cardano.node.stream.engine.replay.ReplaySource
 
 import OxScalusAsyncStream.{Id, given}
@@ -63,7 +63,7 @@ object OxBlockchainStreamProvider {
         config.chainSync match
             case ChainSyncSource.Synthetic =>
                 val slots = buildBackup(config.backup, config.cardanoInfo)
-                bootstrapIfNeeded(config, persistence)
+                bootstrapIfNeeded(config)
                 val engine =
                     buildEngine(config, slots, persistence, config.fallbackReplaySources)
                 new OxBlockchainStreamProvider(
@@ -78,28 +78,34 @@ object OxBlockchainStreamProvider {
 
     /** Synchronous snapshot bootstrap — direct-style. */
     private def bootstrapIfNeeded(
-        config: StreamProviderConfig,
-        persistence: EnginePersistenceStore
+        config: StreamProviderConfig
     )(using ExecutionContext): Unit = config.bootstrap.foreach { source =>
-        val warmTip =
-            Await.result(persistence.load(), Duration.Inf).flatMap(_.snapshot.flatMap(_.tip))
-        if warmTip.isEmpty then {
-            // StreamProviderConfig's `require` enforces `bootstrap ⇒ chainStore.isDefined`.
-            val store = config.chainStore.get
-            val _ = Await.result(
-              new scalus.cardano.node.stream.engine.snapshot.ChainStoreRestorer(store)
-                  .restore(source),
-              Duration.Inf
-            )
-        }
+        // `config.chainStore.get` is safe: `bootstrap` is a field of `StorageProfile.Heavy`, which
+        // always carries a `chainStore`. `SnapshotBootstrap` only restores into the ChainStore; the
+        // engine picks up the restored tip via `Engine.resumeTip` (no redundant engine snapshot to
+        // keep in sync).
+        val _ = Await.result(
+          scalus.cardano.node.stream.engine.snapshot.SnapshotBootstrap.run(
+            source,
+            config.chainStore.get
+          ),
+          Duration.Inf
+        )
     }
 
+    /** Resolve the engine-persistence backend from `config.storage`. `Light` → the explicit
+      * `enginePersistence` if set, else a file-backed store named after `config.appId`; `Heavy` →
+      * the ChainStore itself, wrapped as a [[ChainStorePersistenceStore]].
+      */
     private def resolvePersistence(
         config: StreamProviderConfig
     )(using ExecutionContext): EnginePersistenceStore =
-        Option(config.enginePersistence).getOrElse(
-          FileEnginePersistenceStore.fileForApp(config.appId)
-        )
+        config.storage match {
+            case StorageProfile.Light(eng) =>
+                Option(eng).getOrElse(FileEnginePersistenceStore.fileForApp(config.appId))
+            case StorageProfile.Heavy(cs, _) =>
+                new ChainStorePersistenceStore(cs, config.appId, networkMagicFor(config))
+        }
 
     private def buildEngine(
         config: StreamProviderConfig,
@@ -166,7 +172,7 @@ object OxBlockchainStreamProvider {
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
         val slots = buildBackup(config.backup, config.cardanoInfo)
-        bootstrapIfNeeded(config, persistence)
+        bootstrapIfNeeded(config)
         val fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
         val engine = buildEngine(config, slots, persistence, fallbacks)
         val conn: NodeToNodeConnection = Await.result(
@@ -174,7 +180,7 @@ object OxBlockchainStreamProvider {
               .connect(n.host, n.port, NetworkMagic(n.networkMagic), ClientConfig.default),
           Duration.Inf
         )
-        val startFrom = engine.currentTip match {
+        val startFrom = engine.resumeTip match {
             case Some(tip) => StartFrom.At(tip.point)
             case None      => StartFrom.Tip
         }
@@ -225,7 +231,7 @@ object OxBlockchainStreamProvider {
         persistence: EnginePersistenceStore
     )(using ExecutionContext): OxBlockchainStreamProvider = {
         val slots = buildBackup(config.backup, config.cardanoInfo)
-        bootstrapIfNeeded(config, persistence)
+        bootstrapIfNeeded(config)
         val engine =
             buildEngine(config, slots, persistence, config.fallbackReplaySources)
         val conn = Await.result(
@@ -235,7 +241,7 @@ object OxBlockchainStreamProvider {
           ),
           Duration.Inf
         )
-        val startFrom = engine.currentTip match {
+        val startFrom = engine.resumeTip match {
             case Some(tip) => StartFrom.At(tip.point)
             case None      => StartFrom.Tip
         }

@@ -2,7 +2,7 @@ package scalus.cardano.node.stream
 
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.node.BlockchainProvider
-import scalus.cardano.node.stream.engine.ChainStore
+import scalus.cardano.node.stream.engine.{ChainStore, ChainStoreOwnSubmissions}
 import scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore
 import scalus.cardano.node.stream.engine.replay.{ChainStoreReplaySource, ReplaySource}
 
@@ -15,17 +15,8 @@ import scalus.cardano.node.stream.engine.replay.{ChainStoreReplaySource, ReplayS
   *
   * `cardanoInfo` names the network and seeds the protocol-params cell. `chainSync` picks the
   * live-event source; `backup` answers historical and out-of-window queries that the engine cannot
-  * serve from local state; `storage` selects the engine's memory/durability profile.
-  *
-  * `enginePersistence` controls warm-restart durability. `null` (the default) asks the factory to
-  * wire the platform-appropriate default — a file-backed store keyed by `appId` on the JVM; JS
-  * adapters may fall back to `.noop`. Explicitly passing `EnginePersistenceStore.noop` opts into
-  * Cold-restart semantics (tests, demos, one-shots).
-  *
-  * `chainStore` is an opt-in durable block-history source used as a fallback for checkpoint replay
-  * ([[StartFrom.At]]) when the in-memory rollback buffer doesn't cover the checkpoint. M7 defines
-  * the trait shape (see [[scalus.cardano.node.stream.engine.ChainStore]]); concrete backends land
-  * with M9. Most apps leave it `None`.
+  * serve from local state; `storage` selects the engine's memory/durability profile *and* its
+  * persistence backend — see [[StorageProfile]].
   *
   * See the indexer design doc at `docs/local/claude/indexer/indexer-node.md` for milestone-level
   * context.
@@ -35,16 +26,24 @@ case class StreamProviderConfig(
     cardanoInfo: CardanoInfo,
     chainSync: ChainSyncSource,
     backup: BackupSource,
-    storage: StorageProfile = StorageProfile.Light,
-    enginePersistence: EnginePersistenceStore | Null = null,
-    chainStore: Option[ChainStore] = None,
-    bootstrap: Option[SnapshotSource] = None
+    storage: StorageProfile = StorageProfile.Light()
 ) {
     require(appId.nonEmpty, "StreamProviderConfig.appId must be non-empty")
-    require(
-      bootstrap.isEmpty || chainStore.isDefined,
-      "StreamProviderConfig.bootstrap requires a chainStore to restore into"
-    )
+
+    /** The durable block-history store, if this is a [[StorageProfile.Heavy]] deployment. */
+    def chainStore: Option[ChainStore] = storage match {
+        case StorageProfile.Heavy(cs, _) => Some(cs)
+        case _: StorageProfile.Light     => None
+    }
+
+    /** The cold-start snapshot source, if configured. Structurally Heavy-only — `bootstrap` is a
+      * field of [[StorageProfile.Heavy]], so it cannot exist without a `chainStore` to restore
+      * into.
+      */
+    def bootstrap: Option[SnapshotSource] = storage match {
+        case StorageProfile.Heavy(_, b) => b
+        case _: StorageProfile.Light    => None
+    }
 
     /** Replay sources derived from this config, in the order the engine should try them after the
       * rollback buffer. Today that's just the optional `chainStore`; Phase 2b will add a peer
@@ -145,19 +144,43 @@ enum BlockfrostNetwork {
     case Mainnet, Preview, Preprod
 }
 
-/** What the engine maintains locally. */
+/** How a deployment persists engine state — and, for Heavy mode, where its durable block/UTxO
+  * history lives. Exactly one of the two shapes: configuring "both backends" is unrepresentable.
+  */
 sealed trait StorageProfile
 object StorageProfile {
 
-    /** Per-active-subscription UTxO indexes only; rollback buffer is always present. Memory bounded
-      * by `securityParam` × subscription footprint. Default.
+    /** Light: file-backed engine persistence, no durable chain store. Per-active-subscription UTxO
+      * indexes only; the rollback buffer is always present. Memory bounded by `securityParam` ×
+      * subscription footprint. The default.
+      *
+      * `enginePersistence` controls warm-restart durability. `null` (the default) asks the factory
+      * to wire the platform-appropriate default — a file-backed store keyed by `appId` on the JVM;
+      * JS adapters may fall back to `.noop`. Explicitly passing `EnginePersistenceStore.noop` opts
+      * into Cold-restart semantics (tests, demos, one-shots).
       */
-    case object Light extends StorageProfile
+    case class Light(enginePersistence: EnginePersistenceStore | Null = null) extends StorageProfile
 
-    /** Maintain the full UTxO set locally. `findUtxos` becomes a local lookup for any query.
-      * Multi-GB on mainnet; practically requires Mithril bootstrap (M10). Not wired until M9/M10.
+    /** Heavy: a [[ChainStore]] is the *single* persistence backend and the durable block/UTxO
+      * source. `findUtxos` becomes a local lookup for any query; checkpoint replay past the
+      * rollback-buffer horizon is served from the store. Multi-GB on mainnet; practically requires
+      * a `bootstrap` snapshot source.
+      *
+      * The store must implement [[scalus.cardano.node.stream.engine.ChainStoreOwnSubmissions]]: in
+      * Heavy mode the ChainStore is the sole persistence layer (there is no file store alongside),
+      * so it has to hold the engine's `ownSubmissions` set. `KvChainStore` — including the
+      * RocksDB-backed flavour — qualifies.
+      *
+      * @param chainStore
+      *   the durable store.
+      * @param bootstrap
+      *   optional cold-start snapshot source, restored into `chainStore` when it is empty.
+      *   Structurally cannot exist without a `chainStore`.
       */
-    case object Heavy extends StorageProfile
+    case class Heavy(
+        chainStore: ChainStore & ChainStoreOwnSubmissions,
+        bootstrap: Option[SnapshotSource] = None
+    ) extends StorageProfile
 }
 
 /** Signalled by the factory when a [[ChainSyncSource]] or [[BackupSource]] is named in

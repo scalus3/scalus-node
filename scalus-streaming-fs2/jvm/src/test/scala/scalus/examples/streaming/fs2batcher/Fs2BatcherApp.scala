@@ -5,7 +5,7 @@ import cats.effect.std.Dispatcher
 import scalus.cardano.address.Address
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.node.UtxoSource
-import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StreamProviderConfig, SubscriptionOptions, UtxoEvent, UtxoEventQuery}
+import scalus.cardano.node.stream.{BackupSource, BlockfrostNetwork, ChainSyncSource, StorageProfile, StreamProviderConfig, SubscriptionOptions, UtxoEvent, UtxoEventQuery}
 import scalus.cardano.node.stream.fs2.Fs2BlockchainStreamProvider
 
 import scala.concurrent.ExecutionContext
@@ -40,8 +40,9 @@ object Fs2BatcherApp extends IOApp {
                   cardanoInfo = CardanoInfo.preview,
                   chainSync = ChainSyncSource.Synthetic,
                   backup = BackupSource.Blockfrost(apiKey, BlockfrostNetwork.Preview),
-                  enginePersistence =
-                      scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+                  storage = StorageProfile.Light(
+                    scalus.cardano.node.stream.engine.persistence.EnginePersistenceStore.noop
+                  )
                 )
                 val query = UtxoEventQuery(
                   scalus.cardano.node
