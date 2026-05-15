@@ -171,17 +171,11 @@ final class FileEnginePersistenceStore private (
 
     private def loadSnapshot(): EngineSnapshotFile = {
         val bytes = Files.readAllBytes(snapshotPath)
-        try Cbor.decode(bytes).to[EngineSnapshotFile].value
+        try SchemaMigration.decodeMigrating(bytes)
         catch {
-            case NonFatal(t) => throw EnginePersistenceError.Corrupt(0L, t)
+            case e: EnginePersistenceError => throw e
+            case NonFatal(t)               => throw EnginePersistenceError.Corrupt(0L, t)
         }
-    } match {
-        case snap if snap.schemaVersion == EngineSnapshotFile.CurrentSchemaVersion => snap
-        case snap =>
-            throw EnginePersistenceError.SchemaMismatch(
-              snap.schemaVersion,
-              EngineSnapshotFile.CurrentSchemaVersion
-            )
     }
 
     private def loadJournal(): Seq[JournalRecord] = {
