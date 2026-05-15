@@ -4,10 +4,12 @@ import cats.effect.IO
 import cats.effect.std.Dispatcher
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.{ChainApplier, ClientConfig, NetworkMagic, NodeToNodeClient, NodeToNodeConnection}
+import scalus.cardano.network.infra.MiniProtocolId
 import scalus.cardano.network.n2c.{N2cChainApplier, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
+import scalus.cardano.network.txsubmission.TxSubmission2Driver
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StorageProfile, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, N2nTxSubmissionBackend, StartFrom, StorageProfile, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
 import scalus.cardano.node.stream.engine.persistence.{ChainStorePersistenceStore, EnginePersistenceStore, FileEnginePersistenceStore}
@@ -125,7 +127,8 @@ object Fs2BlockchainStreamProvider {
         config: StreamProviderConfig,
         slots: BackupSlots,
         persistence: EnginePersistenceStore,
-        fallbackReplaySources: List[ReplaySource]
+        fallbackReplaySources: List[ReplaySource],
+        txSubmission: Option[N2nTxSubmissionBackend] = None
     )(using ExecutionContext): IO[Engine] = {
         IO.fromFuture(IO(persistence.load())).flatMap {
             case None =>
@@ -139,7 +142,8 @@ object Fs2BlockchainStreamProvider {
                     config.chainStore,
                     slots.localNode,
                     config.appId,
-                    networkMagicFor(config)
+                    networkMagicFor(config),
+                    txSubmission
                   )
                 )
             case Some(state) =>
@@ -155,7 +159,8 @@ object Fs2BlockchainStreamProvider {
                       config.chainStore,
                       slots.localNode,
                       config.appId,
-                      networkMagicFor(config)
+                      networkMagicFor(config),
+                      txSubmission
                     )
                   )
                 )
@@ -203,8 +208,9 @@ object Fs2BlockchainStreamProvider {
         for {
             slots <- buildBackup(config.backup, config.cardanoInfo)
             _ <- bootstrapIfNeeded(config)
-            fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
-            engine <- buildEngine(config, slots, persistence, fallbacks)
+            // Open the connection FIRST — the TxSubmission2 driver attaches to it before the
+            // Engine is built so it can be wired in as the engine's txSubmission backend (which in
+            // turn makes BaseStreamProvider.submit's N2N dispatch arm active for this deployment).
             conn <- IO.fromFuture(
               IO(
                 NodeToNodeClient.connect(
@@ -215,6 +221,13 @@ object Fs2BlockchainStreamProvider {
                 )
               )
             )
+            driver = new TxSubmission2Driver(
+              conn.channel(MiniProtocolId.TxSubmission),
+              conn.rootToken
+            )
+            driverDone = driver.run()
+            fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
+            engine <- buildEngine(config, slots, persistence, fallbacks, Some(driver))
             startFrom = engine.resumeTip match {
                 case Some(tip) => StartFrom.At(tip.point)
                 case None      => StartFrom.Tip
@@ -239,8 +252,15 @@ object Fs2BlockchainStreamProvider {
             }
         } yield {
             val persistenceClose = persistenceTeardown(persistence, engine, config)
+            // Teardown order: stop the applier, close the connection (which fires the root
+            // cancel — that aborts the driver's parked `receive`, so `driverDone` completes
+            // with the loop's best-effort `MsgDone` already sent), then flush persistence.
             val preClose: () => Future[Unit] = () =>
-                handle.cancel().flatMap(_ => conn.close()).flatMap(_ => persistenceClose())
+                handle
+                    .cancel()
+                    .flatMap(_ => conn.close())
+                    .flatMap(_ => driverDone.recover { case _ => () })
+                    .flatMap(_ => persistenceClose())
             new Fs2BlockchainStreamProvider(engine, preClose)
         }
 

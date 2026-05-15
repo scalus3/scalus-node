@@ -3,10 +3,12 @@ package scalus.cardano.node.stream.ox
 import ox.flow.Flow
 import scalus.cardano.ledger.CardanoInfo
 import scalus.cardano.network.{ChainApplier, ChainApplierHandle, ClientConfig, NetworkMagic, NodeToNodeClient, NodeToNodeConnection}
+import scalus.cardano.network.infra.MiniProtocolId
 import scalus.cardano.network.n2c.{N2cChainApplier, N2cChainApplierHandle, NodeToClientClient}
 import scalus.cardano.network.replay.{PeerReplayConnectionFactory, PeerReplaySource}
+import scalus.cardano.network.txsubmission.TxSubmission2Driver
 import scalus.cardano.node.{BlockchainProvider, BlockfrostProvider}
-import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, StartFrom, StorageProfile, StreamProviderConfig}
+import scalus.cardano.node.stream.{BackupSlots, BackupSource, BlockfrostNetwork, ChainSyncSource, N2nTxSubmissionBackend, StartFrom, StorageProfile, StreamProviderConfig}
 import scalus.cardano.node.stream.BaseStreamProvider
 import scalus.cardano.node.stream.engine.Engine
 import scalus.cardano.node.stream.engine.persistence.{ChainStorePersistenceStore, EnginePersistenceStore, FileEnginePersistenceStore}
@@ -111,7 +113,8 @@ object OxBlockchainStreamProvider {
         config: StreamProviderConfig,
         slots: BackupSlots,
         persistence: EnginePersistenceStore,
-        fallbackReplaySources: List[ReplaySource]
+        fallbackReplaySources: List[ReplaySource],
+        txSubmission: Option[N2nTxSubmissionBackend] = None
     )(using ExecutionContext): Engine = {
         Await.result(persistence.load(), Duration.Inf) match {
             case None =>
@@ -124,7 +127,8 @@ object OxBlockchainStreamProvider {
                   config.chainStore,
                   slots.localNode,
                   config.appId,
-                  networkMagicFor(config)
+                  networkMagicFor(config),
+                  txSubmission
                 )
             case Some(state) =>
                 Await.result(
@@ -138,7 +142,8 @@ object OxBlockchainStreamProvider {
                     config.chainStore,
                     slots.localNode,
                     config.appId,
-                    networkMagicFor(config)
+                    networkMagicFor(config),
+                    txSubmission
                   ),
                   Duration.Inf
                 )
@@ -177,13 +182,20 @@ object OxBlockchainStreamProvider {
     )(using ExecutionContext): OxBlockchainStreamProvider = {
         val slots = buildBackup(config.backup, config.cardanoInfo)
         bootstrapIfNeeded(config)
-        val fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
-        val engine = buildEngine(config, slots, persistence, fallbacks)
+        // Open the connection FIRST — the TxSubmission2 driver attaches to it before the Engine
+        // is built so it can be wired in as the engine's txSubmission backend.
         val conn: NodeToNodeConnection = Await.result(
           NodeToNodeClient
               .connect(n.host, n.port, NetworkMagic(n.networkMagic), ClientConfig.default),
           Duration.Inf
         )
+        val driver = new TxSubmission2Driver(
+          conn.channel(MiniProtocolId.TxSubmission),
+          conn.rootToken
+        )
+        val driverDone: Future[Unit] = driver.run()
+        val fallbacks = config.fallbackReplaySources :+ buildPeerReplaySource(n)
+        val engine = buildEngine(config, slots, persistence, fallbacks, Some(driver))
         val startFrom = engine.resumeTip match {
             case Some(tip) => StartFrom.At(tip.point)
             case None      => StartFrom.Tip
@@ -210,11 +222,12 @@ object OxBlockchainStreamProvider {
 
         val persistenceClose = persistenceTeardown(persistence, engine, config)
         val preClose: () => Future[Unit] = () => {
-            // Cancel applier first so the sync loop unwinds before we close the socket,
-            // then seal persistence.
+            // Teardown order: stop the applier, close the connection (the root cancel aborts
+            // the driver's parked `receive`), await `driverDone`, then seal persistence.
             for {
                 _ <- handle.cancel()
                 _ <- conn.close()
+                _ <- driverDone.recover { case _ => () }
                 _ <- persistenceClose()
             } yield ()
         }
