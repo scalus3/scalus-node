@@ -1,6 +1,6 @@
 package scalus.cardano.node.stream.engine.persistence
 
-import io.bullet.borer.{Decoder, Reader}
+import io.bullet.borer.{Decoder, Encoder, Reader, Writer}
 import scalus.cardano.ledger.TransactionHash
 import scalus.cardano.node.stream.ChainTip
 import scalus.cardano.node.stream.engine.UtxoKey
@@ -8,8 +8,9 @@ import scalus.cardano.node.stream.engine.UtxoKey
 import PersistenceCodecs.given
 
 /** Frozen v1 shape of [[EngineSnapshotFile]] — the M6 layout with no `generation` field. Used by
-  * the [[SchemaMigration]] registry's `1 → 2` step. The encoder is intentionally absent (v1 is no
-  * longer written by this library); only the decoder is needed to read legacy files.
+  * the [[SchemaMigration]] registry's `1 → 2` step. The library no longer writes v1; the encoder is
+  * kept package-private so tests (and any future regression-replay) can produce the legacy shape on
+  * demand.
   */
 private[persistence] final case class EngineSnapshotFileV1(
     schemaVersion: Int,
@@ -33,6 +34,25 @@ private[persistence] final case class EngineSnapshotFileV1(
 }
 
 private[persistence] object EngineSnapshotFileV1 {
+
+    given Encoder[EngineSnapshotFileV1] with
+        def write(w: Writer, s: EngineSnapshotFileV1): Writer = {
+            w.writeArrayHeader(7)
+                .writeInt(s.schemaVersion)
+                .writeString(s.appId)
+                .writeLong(s.networkMagic)
+            s.tip match {
+                case Some(t) => w.writeArrayHeader(1).write(t)
+                case None    => w.writeArrayHeader(0)
+            }
+            w.writeArrayHeader(s.ownSubmissions.size)
+            s.ownSubmissions.foreach(h => w.write(h))
+            w.writeArrayHeader(s.volatileTail.size)
+            s.volatileTail.foreach(b => w.write(b))
+            w.writeArrayHeader(s.buckets.size)
+            s.buckets.foreach { (k, v) => w.writeArrayHeader(2).write(k).write(v) }
+            w
+        }
 
     given Decoder[EngineSnapshotFileV1] with
         def read(r: Reader): EngineSnapshotFileV1 = {

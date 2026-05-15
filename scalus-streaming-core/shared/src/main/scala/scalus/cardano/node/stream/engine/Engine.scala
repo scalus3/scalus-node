@@ -361,7 +361,7 @@ final class Engine(
         // are swallowed by the store's appendSync contract (next flush/compact surfaces them).
         val persistedDeltas: Map[UtxoKey, BucketDelta] =
             bucketDeltas.view.mapValues(d => BucketDelta(d.added, d.removed)).toMap
-        persistence.appendSync(
+        journalAppend(
           JournalRecord.Forward(block.tip, block.transactionIds, persistedDeltas)
         )
 

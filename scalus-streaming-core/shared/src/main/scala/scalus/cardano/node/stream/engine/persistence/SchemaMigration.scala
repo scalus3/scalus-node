@@ -14,9 +14,8 @@ import io.bullet.borer.{Cbor, Dom}
   *     a pure `Array[Byte] => Array[Byte]` re-encode, implemented over frozen per-version codecs so
   *     it never depends on the current `EngineSnapshotFile` shape.
   *
-  * [[migrations]] is empty today — the M6 format is the only version. The first real entry lands
-  * with M14.C, which bumps the snapshot to v2. Until then a `< current` version is unreachable in
-  * practice and an unknown one fails `SchemaMismatch` like any missing step.
+  * [[migrations]] holds one entry today (`1 → 2`); new entries are added when the snapshot format
+  * changes.
   */
 object SchemaMigration {
 

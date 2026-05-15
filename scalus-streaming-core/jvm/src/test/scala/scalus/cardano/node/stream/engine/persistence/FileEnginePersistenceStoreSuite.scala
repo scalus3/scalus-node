@@ -213,6 +213,44 @@ class FileEnginePersistenceStoreSuite extends AnyFunSuite {
         }
     }
 
+    test("Engine.onRollForward triggers runtime compaction once the threshold is crossed") {
+        // Regression test for M14.C: onRollForward must route its persistence write through
+        // journalAppend (which polls compactionDue), not bare persistence.appendSync. Otherwise
+        // Forward records — the dominant write source on a live chain — bypass the threshold
+        // trigger and compaction never fires.
+        withTempDir { dir =>
+            val appId = "forward-compact"
+            val store =
+                FileEnginePersistenceStore.file(dir, appId, compactionThresholdBytes = 200L)
+            val engine = new Engine(
+              ci,
+              None,
+              Engine.DefaultSecurityParam,
+              store,
+              appId = appId,
+              networkMagic = 42L
+            )
+            try {
+                (1 to 10).foreach { i =>
+                    Await.result(
+                      engine.onRollForward(
+                        block(i, tx(i, producing = IndexedSeq(output(addressA, i.toLong * 10))))
+                      ),
+                      timeout
+                    )
+                }
+                val snapshotPath = dir.resolve(s"$appId.snapshot")
+                assert(
+                  Files.exists(snapshotPath),
+                  "compaction should have written a snapshot after the threshold was crossed"
+                )
+            } finally {
+                Await.result(engine.shutdown(), timeout)
+                Await.result(store.close(), timeout)
+            }
+        }
+    }
+
     test("engine + file store round-trip through shutdown + rebuild") {
         withTempDir { dir =>
             val appId = "engine-roundtrip"

@@ -80,18 +80,15 @@ final class FileEnginePersistenceStore private (
     private val buffer: ByteBuffer = ByteBuffer.allocate(bufferCapacityBytes)
     private val closed: AtomicBoolean = new AtomicBoolean(false)
 
-    /** Cached snapshot — read once at construction; reused by [[load]] so the file is only parsed
-      * once per store lifetime. `None` ⇒ no snapshot file (first run).
+    /** The generation the file store is currently writing under. Read once at construction from the
+      * on-disk snapshot (if any); bumped on every successful [[compact]]. The snapshot itself is
+      * not retained — `load()` reads it again from disk. Pinning the snapshot for the store's
+      * lifetime would hold the engine's full bucket state (tens to hundreds of MB on real indexers)
+      * for no benefit, since `load()` is called at most once per startup.
       */
-    private val cachedSnapshot: Option[EngineSnapshotFile] =
-        if Files.exists(snapshotPath) then Some(readSnapshot())
-        else None
-
-    /** The generation the file store is currently writing under. Initialised from the cached
-      * snapshot; bumped on every successful [[compact]].
-      */
-    private val currentGenerationRef: AtomicLong =
-        new AtomicLong(cachedSnapshot.map(_.generation).getOrElse(0L))
+    private val currentGenerationRef: AtomicLong = new AtomicLong(
+      if Files.exists(snapshotPath) then readSnapshot().generation else 0L
+    )
 
     /** Byte counter for threshold-triggered compaction. Incremented after each successful
       * [[appendSync]] write; reset to 0 on [[compact]].
@@ -120,9 +117,11 @@ final class FileEnginePersistenceStore private (
     // ------------------------------------------------------------------
 
     def load(): Future[Option[PersistedEngineState]] = Future {
+        val snap: Option[EngineSnapshotFile] =
+            if Files.exists(snapshotPath) then Some(readSnapshot()) else None
         val records: Seq[JournalRecord] = loadJournal()
-        if cachedSnapshot.isEmpty && records.isEmpty then None
-        else Some(PersistedEngineState(cachedSnapshot, records))
+        if snap.isEmpty && records.isEmpty then None
+        else Some(PersistedEngineState(snap, records))
     }
 
     def appendSync(record: JournalRecord): Unit = {
@@ -139,8 +138,8 @@ final class FileEnginePersistenceStore private (
                     buffer.putInt(bytes.length)
                     buffer.put(bytes)
                 }
+                val _ = journalBytesSinceCompactionRef.addAndGet(required.toLong)
             }
-            val _ = journalBytesSinceCompactionRef.addAndGet(required.toLong)
         catch {
             case NonFatal(t) =>
                 // Swallow — by contract, transient append errors are logged and surface via the
