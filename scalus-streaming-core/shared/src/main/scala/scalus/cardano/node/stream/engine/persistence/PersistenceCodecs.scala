@@ -260,7 +260,7 @@ object PersistenceCodecs {
 
     given Encoder[EngineSnapshotFile] with
         def write(w: Writer, s: EngineSnapshotFile): Writer = {
-            w.writeArrayHeader(7)
+            w.writeArrayHeader(8)
                 .writeInt(s.schemaVersion)
                 .writeString(s.appId)
                 .writeLong(s.networkMagic)
@@ -276,13 +276,14 @@ object PersistenceCodecs {
             s.buckets.foreach { (k, v) =>
                 w.writeArrayHeader(2).write(k).write(v)
             }
+            w.writeLong(s.generation)
             w
         }
 
     given Decoder[EngineSnapshotFile] with
         def read(r: Reader): EngineSnapshotFile = {
             val len = r.readArrayHeader().toInt
-            if len != 7 then r.validationFailure(s"EngineSnapshotFile arrLen=$len (expected 7)")
+            if len != 8 then r.validationFailure(s"EngineSnapshotFile arrLen=$len (expected 8)")
             val schemaVersion = r.readInt()
             val appId = r.readString()
             val networkMagic = r.readLong()
@@ -309,6 +310,7 @@ object PersistenceCodecs {
                 bucketsB += (r.read[UtxoKey]() -> r.read[BucketState]())
                 i += 1
             }
+            val generation = r.readLong()
             EngineSnapshotFile(
               schemaVersion,
               appId,
@@ -316,7 +318,8 @@ object PersistenceCodecs {
               tip,
               subsB.result(),
               tailB.result(),
-              bucketsB.result()
+              bucketsB.result(),
+              generation
             )
         }
 

@@ -43,24 +43,77 @@ class SchemaMigrationSuite extends AnyFunSuite {
         }
     }
 
-    test("decodeMigrating folds a synthetic migration chain to the current version") {
-        // Synthetic v0 → v1 step: re-encode at the current schemaVersion. Exercises the chain-fold
-        // before any real migration ships — the production migrations map stays empty until M14.C.
+    test("decodeMigrating folds a multi-step synthetic chain to the current version") {
+        // Two synthetic steps 0 → 1 → 2 — each only bumps the version field. Exercises the
+        // chain-fold logic with more than one step (a single-step chain would not).
         val v0Snap = snapshotAt(0).copy(appId = "test.app.migrated", networkMagic = 99L)
         val v0Bytes = PersistenceCodecs.encodeSnapshot(v0Snap)
 
-        val migrations: Map[Int, SchemaMigration.Migration] = Map(
-          0 -> { bs =>
-              val decoded = PersistenceCodecs.decodeSnapshot(bs)
-              PersistenceCodecs.encodeSnapshot(
-                decoded.copy(schemaVersion = EngineSnapshotFile.CurrentSchemaVersion)
-              )
-          }
-        )
+        def bump(toVersion: Int): SchemaMigration.Migration = { bs =>
+            val decoded = PersistenceCodecs.decodeSnapshot(bs)
+            PersistenceCodecs.encodeSnapshot(decoded.copy(schemaVersion = toVersion))
+        }
+        val migrations: Map[Int, SchemaMigration.Migration] =
+            Map(0 -> bump(1), 1 -> bump(EngineSnapshotFile.CurrentSchemaVersion))
 
         val result = SchemaMigration.decodeMigrating(v0Bytes, migrations)
         assert(result.schemaVersion == EngineSnapshotFile.CurrentSchemaVersion)
         assert(result.appId == "test.app.migrated")
         assert(result.networkMagic == 99L)
+    }
+
+    test("decodeMigrating upgrades a real v1 snapshot to the current version (v2)") {
+        // End-to-end test of the production v1 → v2 migration registered in SchemaMigration.
+        // Encode using the frozen v1 codec (arrLen=7, no `generation`), decode through the
+        // public production path, expect a v2 EngineSnapshotFile with generation = 0.
+        import EngineSnapshotFileV1.given
+        import io.bullet.borer.Cbor
+        val v1 = EngineSnapshotFileV1(
+          schemaVersion = 1,
+          appId = "test.app.v1",
+          networkMagic = 7L,
+          tip = None,
+          ownSubmissions = Set.empty,
+          volatileTail = Seq.empty,
+          buckets = Map.empty
+        )
+        // Frozen v1 has decoder-only; hand-encode via PersistenceCodecs.encodeSnapshot of an
+        // equivalently-shaped v2 snapshot whose schemaVersion field is 1 would still write 8
+        // fields and not match v1's 7-field shape. So write a 7-element CBOR array directly via
+        // borer's Writer API by constructing a v1-shaped snapshot through a small helper.
+        val v1Bytes = encodeV1(v1)
+
+        val result = SchemaMigration.decodeMigrating(v1Bytes)
+        assert(result.schemaVersion == EngineSnapshotFile.CurrentSchemaVersion)
+        assert(result.appId == "test.app.v1")
+        assert(result.networkMagic == 7L)
+        assert(result.generation == 0L)
+    }
+
+    /** Encode a v1 snapshot using the frozen v1 wire shape (7-element array, no generation). */
+    private def encodeV1(v1: EngineSnapshotFileV1): Array[Byte] = {
+        import io.bullet.borer.{Cbor, Encoder, Writer}
+        given Encoder[EngineSnapshotFileV1] with
+            def write(w: Writer, s: EngineSnapshotFileV1): Writer = {
+                import PersistenceCodecs.given
+                w.writeArrayHeader(7)
+                    .writeInt(s.schemaVersion)
+                    .writeString(s.appId)
+                    .writeLong(s.networkMagic)
+                s.tip match {
+                    case Some(t) => w.writeArrayHeader(1).write(t)
+                    case None    => w.writeArrayHeader(0)
+                }
+                w.writeArrayHeader(s.ownSubmissions.size)
+                s.ownSubmissions.foreach(h => w.write(h))
+                w.writeArrayHeader(s.volatileTail.size)
+                s.volatileTail.foreach(b => w.write(b))
+                w.writeArrayHeader(s.buckets.size)
+                s.buckets.foreach { (k, v) =>
+                    w.writeArrayHeader(2).write(k).write(v)
+                }
+                w
+            }
+        Cbor.encode(v1).toByteArray
     }
 }

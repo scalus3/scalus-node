@@ -9,7 +9,8 @@ import scalus.uplc.builtin.Data
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
@@ -43,7 +44,9 @@ final class Engine(
     val persistence: EnginePersistenceStore = EnginePersistenceStore.noop,
     val fallbackReplaySources: List[replay.ReplaySource] = Nil,
     val chainStore: Option[ChainStore] = None,
-    val localNode: Option[LocalNodeBackend] = None
+    val localNode: Option[LocalNodeBackend] = None,
+    val appId: String = "",
+    val networkMagic: Long = 0L
 ) {
 
     import Engine.UtxoSubscription
@@ -397,7 +400,7 @@ final class Engine(
                     // its status settles on `Pending` rather than the `NotFound` the line above
                     // emits when `mempoolPending` doesn't yet know about it.
                     triggerMempoolPoll()
-                    persistence.appendSync(JournalRecord.Backward(to))
+                    journalAppend(JournalRecord.Backward(to))
                     chainStore.foreach { store =>
                         try store.rollbackTo(to)
                         catch {
@@ -436,7 +439,7 @@ final class Engine(
     def notifySubmit(hash: TransactionHash): Future[Unit] = submit {
         txHashIndex.recordOwnSubmission(hash)
         txStatusSubs.get(hash).foreach(_.values.foreach(_.offer(TransactionStatus.Pending)))
-        persistence.appendSync(JournalRecord.OwnSubmitted(hash))
+        journalAppend(JournalRecord.OwnSubmitted(hash))
     }
 
     /** Schedule a `checkInMempoolBatch` against the configured `LocalNodeBackend` and apply the
@@ -567,18 +570,31 @@ final class Engine(
     // Persistence
     // ------------------------------------------------------------------
 
-    /** Build a serialisable snapshot of the current engine state.
-      *
-      * `appId` and `networkMagic` are caller-provided (engine doesn't know about them) and travel
-      * in the snapshot so a subsequent [[Engine.rebuildFrom]] can cross-check against the running
-      * config. Runs on the worker thread so the view is internally consistent.
+    /** Build a serialisable snapshot of the current engine state, using the engine's configured
+      * `appId` / `networkMagic` (M14.C). Runs on the worker thread for an internally-consistent
+      * view.
+      */
+    def takeSnapshot(): Future[EngineSnapshotFile] = takeSnapshot(this.appId, this.networkMagic)
+
+    /** As [[takeSnapshot()*]] but with caller-supplied `appId` / `networkMagic` — kept for tests
+      * and callers that pre-date the engine carrying those fields.
       */
     def takeSnapshot(appId: String, networkMagic: Long): Future[EngineSnapshotFile] = submit {
+        buildSnapshotInline(appId, networkMagic)
+    }
+
+    /** Same body as [[takeSnapshot]] but without the `submit` wrapper — callable directly from the
+      * worker thread (e.g. from [[maybeCompact]]) where we are already inside `submit`. Calling
+      * this off-worker is incorrect — it reads engine state.
+      */
+    private def buildSnapshotInline(
+        appId: String,
+        networkMagic: Long
+    ): EngineSnapshotFile = {
         val bucketSnaps: Map[UtxoKey, BucketState] =
             byKey.iterator.map { case (k, b) => k -> BucketState(k, b.snapshot) }.toMap
         // Rebuild per-block deltas for the volatile tail by aligning each block with the bucket
-        // history entries whose point matches. Deltas are the same shape as the ones written by
-        // onRollForward; here we reconstruct them from the (already-maintained) Bucket history.
+        // history entries whose point matches.
         val tail: Seq[AppliedBlockSummary] = rollbackBuffer.volatileTail.map { blk =>
             val deltasForBlock: Map[UtxoKey, BucketDelta] =
                 byKey.iterator.flatMap { case (key, b) =>
@@ -586,6 +602,7 @@ final class Engine(
                 }.toMap
             AppliedBlockSummary(blk.tip, blk.transactionIds, deltasForBlock)
         }
+        // `generation = 0` is a placeholder — the file store stamps the real value in `compact`.
         EngineSnapshotFile(
           schemaVersion = EngineSnapshotFile.CurrentSchemaVersion,
           appId = appId,
@@ -593,8 +610,33 @@ final class Engine(
           tip = tipRef.get,
           ownSubmissions = txHashIndex.ownSubmissionsSnapshot,
           volatileTail = tail,
-          buckets = bucketSnaps
+          buckets = bucketSnaps,
+          generation = 0L
         )
+    }
+
+    /** Append a journal record AND (M14.C) trigger a runtime compaction if the persistence store
+      * has crossed its threshold. Caller MUST be on the engine worker — both paths read worker-only
+      * state (the byte counter is atomic but [[buildSnapshotInline]] is not).
+      *
+      * The compaction blocks the worker for the duration of `persistence.compact(snap)`'s I/O —
+      * deliberate: it avoids the race where post-snapshot `appendSync` records would be truncated
+      * by a concurrent compaction. Snapshots are small (engine-local state, KB to single-MB), so
+      * the stall is bounded.
+      */
+    private def journalAppend(record: JournalRecord): Unit = {
+        persistence.appendSync(record)
+        if persistence.compactionDue then {
+            val snap = buildSnapshotInline(this.appId, this.networkMagic)
+            try { val _ = Await.result(persistence.compact(snap), Duration.Inf) }
+            catch {
+                case NonFatal(t) =>
+                    logger.warn(
+                      s"runtime compaction failed; the journal will keep growing until the next attempt",
+                      t
+                    )
+            }
+        }
     }
 
     /** Replay state from a loaded [[PersistedEngineState]] into this engine. Called by
@@ -1029,7 +1071,9 @@ object Engine {
         persistence: EnginePersistenceStore,
         fallbackReplaySources: List[replay.ReplaySource] = Nil,
         chainStore: Option[ChainStore] = None,
-        localNode: Option[LocalNodeBackend] = None
+        localNode: Option[LocalNodeBackend] = None,
+        appId: String = "",
+        networkMagic: Long = 0L
     )(using scala.concurrent.ExecutionContext): Future[Engine] = {
         val engine = new Engine(
           cardanoInfo,
@@ -1038,7 +1082,9 @@ object Engine {
           persistence,
           fallbackReplaySources,
           chainStore,
-          localNode
+          localNode,
+          appId,
+          networkMagic
         )
         engine.restoreInto(state).map(_ => engine)
     }

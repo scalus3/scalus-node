@@ -23,6 +23,12 @@ final case class PersistedEngineState(
   *
   * `volatileTail` holds up to `securityParam` per-block summaries so the rollback buffer is
   * faithfully reconstructed — not just the tip.
+  *
+  * `generation` is a monotonic counter the file store bumps on every successful compaction; the
+  * journal file's header carries the same generation. A mismatch ⇒ the journal is discarded on
+  * load. Makes the rename-then-truncate sequence in `compact` crash-atomic. M14.C onwards. The
+  * engine sets `generation = 0` when building a snapshot — the store stamps the real value before
+  * writing.
   */
 final case class EngineSnapshotFile(
     schemaVersion: Int,
@@ -31,13 +37,18 @@ final case class EngineSnapshotFile(
     tip: Option[ChainTip],
     ownSubmissions: Set[TransactionHash],
     volatileTail: Seq[AppliedBlockSummary],
-    buckets: Map[UtxoKey, BucketState]
+    buckets: Map[UtxoKey, BucketState],
+    generation: Long = 0L
 )
 
 object EngineSnapshotFile {
 
-    /** Bumped on incompatible on-disk format changes. Snapshots older than this value fail to load
-      * with [[EnginePersistenceError.SchemaMismatch]]; users reset + cold-start.
+    /** Bumped on incompatible on-disk format changes. Older snapshots are upgraded through the
+      * [[SchemaMigration]] registry; a newer one (file written by a future library) fails to load
+      * with [[EnginePersistenceError.SchemaMismatch]] — there is no forward migration.
+      *
+      *   - v1 (M6): the seven-field shape, no generation.
+      *   - v2 (M14.C): adds [[EngineSnapshotFile.generation]].
       */
-    val CurrentSchemaVersion: Int = 1
+    val CurrentSchemaVersion: Int = 2
 }

@@ -122,7 +122,9 @@ object OxBlockchainStreamProvider {
                   persistence,
                   fallbackReplaySources,
                   config.chainStore,
-                  slots.localNode
+                  slots.localNode,
+                  config.appId,
+                  networkMagicFor(config)
                 )
             case Some(state) =>
                 Await.result(
@@ -134,7 +136,9 @@ object OxBlockchainStreamProvider {
                     persistence,
                     fallbackReplaySources,
                     config.chainStore,
-                    slots.localNode
+                    slots.localNode,
+                    config.appId,
+                    networkMagicFor(config)
                   ),
                   Duration.Inf
                 )
@@ -148,7 +152,7 @@ object OxBlockchainStreamProvider {
     )(using ExecutionContext): () => Future[Unit] = () =>
         for {
             _ <- persistence.flush()
-            snap <- engine.takeSnapshot(config.appId, networkMagicFor(config))
+            snap <- engine.takeSnapshot()
             _ <- persistence.compact(snap)
             _ <- persistence.close()
             _ = config.chainStore.foreach(_.close())

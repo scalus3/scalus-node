@@ -23,8 +23,16 @@ object SchemaMigration {
     /** One `vN → vN+1` step. */
     type Migration = Array[Byte] => Array[Byte]
 
-    /** Migration steps keyed by *source* version. Empty until the first format change (M14.C). */
-    private val migrations: Map[Int, Migration] = Map.empty
+    /** Migration steps keyed by *source* version. */
+    private val migrations: Map[Int, Migration] = Map(
+      // v1 (M6) → v2 (M14.C, adds `generation`). Decode with the frozen v1 codec, supply
+      // `generation = 0`, re-encode with the current (v2) codec.
+      1 -> { bytes =>
+          import EngineSnapshotFileV1.given
+          val v1 = Cbor.decode(bytes).to[EngineSnapshotFileV1].value
+          PersistenceCodecs.encodeSnapshot(v1.toV2)
+      }
+    )
 
     /** Read the on-disk `schemaVersion` without committing to the rest of the decode. Returns the
       * first int of the snapshot's outer CBOR array.

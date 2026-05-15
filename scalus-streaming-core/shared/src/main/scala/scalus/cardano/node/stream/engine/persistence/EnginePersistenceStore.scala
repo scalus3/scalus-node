@@ -36,6 +36,14 @@ trait EnginePersistenceStore {
       */
     def compact(snap: EngineSnapshotFile): Future[Unit]
 
+    /** `true` when the journal has accumulated enough since the last compaction that a fresh
+      * snapshot would be worth writing. Polled by the engine after each [[appendSync]]; the engine
+      * builds a snapshot and calls [[compact]] when it returns `true`. Default `false` — stores
+      * that don't have a journal (`noop`, `inMemory`, `ChainStorePersistenceStore`) never need
+      * compaction.
+      */
+    def compactionDue: Boolean = false
+
     /** Release any file handles and process-level locks. */
     def close(): Future[Unit]
 }

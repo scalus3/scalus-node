@@ -134,6 +134,85 @@ class FileEnginePersistenceStoreSuite extends AnyFunSuite {
         }
     }
 
+    test("compactionDue flips when the journal crosses the threshold") {
+        withTempDir { dir =>
+            val store =
+                FileEnginePersistenceStore.file(dir, "threshold", compactionThresholdBytes = 100L)
+            try {
+                assert(!store.compactionDue, "false on first open")
+                (1 to 20).foreach(i => store.appendSync(JournalRecord.OwnSubmitted(txHash(i))))
+                assert(store.compactionDue, "true after crossing threshold")
+            } finally Await.result(store.close(), timeout)
+        }
+    }
+
+    test("compact resets compactionDue") {
+        withTempDir { dir =>
+            val appId = "reset-due"
+            val store =
+                FileEnginePersistenceStore.file(dir, appId, compactionThresholdBytes = 100L)
+            try {
+                (1 to 20).foreach(i => store.appendSync(JournalRecord.OwnSubmitted(txHash(i))))
+                assert(store.compactionDue)
+                val snap = EngineSnapshotFile(
+                  schemaVersion = EngineSnapshotFile.CurrentSchemaVersion,
+                  appId = appId,
+                  networkMagic = 0L,
+                  tip = None,
+                  ownSubmissions = Set.empty,
+                  volatileTail = Seq.empty,
+                  buckets = Map.empty
+                )
+                Await.result(store.compact(snap), timeout)
+                assert(!store.compactionDue, "false after compact")
+            } finally Await.result(store.close(), timeout)
+        }
+    }
+
+    test("journal with mismatched generation is discarded on reopen") {
+        withTempDir { dir =>
+            val appId = "gen-mismatch"
+            // First session: append, compact (bumps gen to 1), append more (post-compact records
+            // are at gen 1 — valid). Then on close the journal sits at gen 1 with one record.
+            val store1 = FileEnginePersistenceStore.file(dir, appId)
+            store1.appendSync(JournalRecord.OwnSubmitted(txHash(1)))
+            val snap = EngineSnapshotFile(
+              schemaVersion = EngineSnapshotFile.CurrentSchemaVersion,
+              appId = appId,
+              networkMagic = 0L,
+              tip = None,
+              ownSubmissions = Set.empty,
+              volatileTail = Seq.empty,
+              buckets = Map.empty
+            )
+            Await.result(store1.compact(snap), timeout)
+            store1.appendSync(JournalRecord.OwnSubmitted(txHash(2)))
+            Await.result(store1.flush(), timeout)
+            Await.result(store1.close(), timeout)
+
+            // Simulate the rename-vs-truncate crash window: rewrite the journal header's
+            // generation to a stale value (0) while the snapshot stays at gen 1.
+            val logPath = dir.resolve(s"$appId.log")
+            val ch = java.nio.channels.FileChannel.open(logPath, StandardOpenOption.WRITE)
+            try {
+                val staleGen =
+                    ByteBuffer.allocate(8).order(java.nio.ByteOrder.BIG_ENDIAN).putLong(0L)
+                staleGen.flip()
+                ch.position(8L) // skip magic (4) + schemaVersion (4); generation at offset 8
+                while staleGen.hasRemaining do { val _ = ch.write(staleGen) }
+                ch.force(true)
+            } finally ch.close()
+
+            val store2 = FileEnginePersistenceStore.file(dir, appId)
+            try {
+                val loaded = Await.result(store2.load(), timeout)
+                assert(loaded.isDefined)
+                assert(loaded.get.snapshot.isDefined)
+                assert(loaded.get.journal.isEmpty, "stale-gen journal should be discarded")
+            } finally Await.result(store2.close(), timeout)
+        }
+    }
+
     test("engine + file store round-trip through shutdown + rebuild") {
         withTempDir { dir =>
             val appId = "engine-roundtrip"

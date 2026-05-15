@@ -137,7 +137,9 @@ object Fs2BlockchainStreamProvider {
                     persistence,
                     fallbackReplaySources,
                     config.chainStore,
-                    slots.localNode
+                    slots.localNode,
+                    config.appId,
+                    networkMagicFor(config)
                   )
                 )
             case Some(state) =>
@@ -151,7 +153,9 @@ object Fs2BlockchainStreamProvider {
                       persistence,
                       fallbackReplaySources,
                       config.chainStore,
-                      slots.localNode
+                      slots.localNode,
+                      config.appId,
+                      networkMagicFor(config)
                     )
                   )
                 )
@@ -169,7 +173,7 @@ object Fs2BlockchainStreamProvider {
     )(using ExecutionContext): () => Future[Unit] = () =>
         for {
             _ <- persistence.flush()
-            snap <- engine.takeSnapshot(config.appId, networkMagicFor(config))
+            snap <- engine.takeSnapshot()
             _ <- persistence.compact(snap)
             _ <- persistence.close()
             _ = config.chainStore.foreach(_.close())
