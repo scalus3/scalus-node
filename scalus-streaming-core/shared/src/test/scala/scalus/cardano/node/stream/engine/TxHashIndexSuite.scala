@@ -32,6 +32,19 @@ class TxHashIndexSuite extends AnyFunSuite {
         assert(index.statusOf(txHash(20)).isEmpty)
     }
 
+    test("confirmationTip returns the tip carrying blockNo (for depth math)") {
+        val index = new TxHashIndex
+        index.applyForward(block(7, tx(42)))
+        val tip = index.confirmationTip(txHash(42))
+        assert(tip.isDefined)
+        assert(tip.get.point == point(7))
+        // EngineTestFixtures.block(slot, ...) builds a ChainTip whose blockNo == slot. Depth math
+        // in Engine.confirmationDepth uses this same blockNo.
+        assert(tip.get.blockNo == 7L)
+        // No confirmation tip for unknown tx.
+        assert(index.confirmationTip(txHash(99)).isEmpty)
+    }
+
     test("forgetBlock drops the per-block journal but keeps Confirmed status") {
         val index = new TxHashIndex
         index.applyForward(block(1, tx(10)))

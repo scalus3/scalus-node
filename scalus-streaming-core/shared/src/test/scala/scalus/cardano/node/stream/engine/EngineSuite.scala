@@ -168,6 +168,24 @@ class EngineSuite extends AnyFunSuite {
         assert(latest.contains(Confirmed))
     }
 
+    test("confirmationDepth: 0 right after confirming, grows as tip advances") {
+        val engine = mkEngine()
+        val h = txHash(555)
+        Await.result(engine.onRollForward(block(10, tx(555))), timeout)
+        // Confirmed in the tip block ⇒ depth 0.
+        assert(Await.result(engine.confirmationDepth(h), timeout).contains(0))
+        Await.result(engine.onRollForward(block(11)), timeout)
+        assert(Await.result(engine.confirmationDepth(h), timeout).contains(1))
+        Await.result(engine.onRollForward(block(15)), timeout)
+        // EngineTestFixtures.block(slot, …) assigns blockNo == slot, so depth = 15 - 10 = 5.
+        assert(Await.result(engine.confirmationDepth(h), timeout).contains(5))
+    }
+
+    test("confirmationDepth is None for an unknown hash") {
+        val engine = mkEngine()
+        assert(Await.result(engine.confirmationDepth(txHash(404)), timeout).isEmpty)
+    }
+
     test("currentTip tracks the latest applied block") {
         val engine = mkEngine()
         assert(engine.currentTip.isEmpty)

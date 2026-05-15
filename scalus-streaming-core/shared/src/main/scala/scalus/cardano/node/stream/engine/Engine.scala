@@ -153,6 +153,18 @@ final class Engine(
         engineKnownStatus(hash)
     }
 
+    /** How many blocks deep `hash` is in the engine's confirmed view: `currentTip.blockNo -
+      * confirmedAt.blockNo`. `None` when the hash is not confirmed in the rollback buffer (or has
+      * aged past it). A freshly-confirmed tx has depth `0` (it is *in* the tip block). Read on the
+      * worker so the tip and confirmation tip are consistent.
+      */
+    def confirmationDepth(hash: TransactionHash): Future[Option[Int]] = submit {
+        for {
+            confTip <- txHashIndex.confirmationTip(hash)
+            tip <- tipRef.get
+        } yield (tip.blockNo - confTip.blockNo).toInt
+    }
+
     /** Status the engine itself can answer for `hash`, in precedence order: `Confirmed` from the
       * chain index, own-`Pending` from `notifySubmit`, mempool-`Pending` from the latest LTM poll.
       * `None` means the engine doesn't know — `txStatus` callers fall through to a backup. Caller

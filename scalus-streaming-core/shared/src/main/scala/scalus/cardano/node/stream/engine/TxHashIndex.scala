@@ -2,7 +2,7 @@ package scalus.cardano.node.stream.engine
 
 import scalus.cardano.ledger.TransactionHash
 import scalus.cardano.node.TransactionStatus
-import scalus.cardano.node.stream.ChainPoint
+import scalus.cardano.node.stream.{ChainPoint, ChainTip}
 
 import scala.collection.mutable
 
@@ -19,7 +19,10 @@ import scala.collection.mutable
   */
 final class TxHashIndex {
 
-    private val confirmedAt = mutable.Map.empty[TransactionHash, ChainPoint]
+    /** Confirming tip — `ChainTip` rather than `ChainPoint` so depth math (`currentTip.blockNo -
+      * confirmedAt.blockNo`) is available to callers without a side index.
+      */
+    private val confirmedAt = mutable.Map.empty[TransactionHash, ChainTip]
 
     /** Hashes we submitted ourselves. Lifetime-stable: NOT cleared on confirmation, so that a
       * rollback of a confirmation correctly reverts to `Pending` rather than `NotFound`. Trims are
@@ -35,7 +38,7 @@ final class TxHashIndex {
 
     def applyForward(block: AppliedBlock): Unit = {
         val ids = block.transactionIds
-        ids.foreach(h => confirmedAt.update(h, block.point))
+        ids.foreach(h => confirmedAt.update(h, block.tip))
         perBlock += (block.point -> ids)
     }
 
@@ -76,7 +79,13 @@ final class TxHashIndex {
         else None
 
     def confirmationPoint(hash: TransactionHash): Option[ChainPoint] =
-        confirmedAt.get(hash)
+        confirmedAt.get(hash).map(_.point)
+
+    /** The full [[ChainTip]] (point + height) where `hash` was confirmed, or `None` if not in the
+      * volatile tail. Carries `blockNo` so the engine can compute confirmation depth without a side
+      * lookup.
+      */
+    def confirmationTip(hash: TransactionHash): Option[ChainTip] = confirmedAt.get(hash)
 
     /** Snapshot of the own-submission set for persistence. Immutable copy. */
     def ownSubmissionsSnapshot: Set[TransactionHash] = ownSubmissions.toSet

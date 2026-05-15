@@ -5,7 +5,8 @@ import scalus.cardano.node.{BlockchainProvider, BlockchainReader, SubmitError, T
 import scalus.uplc.builtin.Data
 import scalus.cardano.node.stream.engine.{Engine, Mailbox}
 
-import scala.concurrent.{ExecutionContext, Future}
+import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /** Common implementation glue for streaming providers across adapters. All subscription plumbing
   * and snapshot-method fall-through lives here; concrete adapters only need to:
@@ -230,39 +231,86 @@ abstract class BaseStreamProvider[F[_], C[_]](
                         case None     => Future.successful(Left(noBackupSubmitError))
         }
 
+    /** Three-arg overload — overrides the [[scalus.cardano.node.BlockchainProviderTF]] method.
+      * Equivalent to `pollForConfirmation(txHash, maxAttempts, delayMs, confirmations = 0)`:
+      * preserves the M2 semantic "first sighting wins, depth = 1 implicitly."
+      */
     final def pollForConfirmation(
         txHash: TransactionHash,
         maxAttempts: Int,
         delayMs: Long
+    ): F[TransactionStatus] = pollForConfirmation(txHash, maxAttempts, delayMs, 0)
+
+    /** Poll until `txHash` is at depth ≥ `confirmations` in the engine's view, or `maxAttempts`
+      * exhausts. `confirmations = 0` preserves the M2 semantic; `> 0` waits until the tx is buried
+      * that many blocks deep.
+      *
+      * Depth is engine-internal: derived from the rollback-buffer `TxHashIndex` + `currentTip`.
+      * When `confirmations > 0` the backup-side `pollForConfirmation` is bypassed (it has no
+      * concept of *our* depth), and the loop runs locally regardless of backup configuration.
+      *
+      * If the tx is confirmed at some shallower depth and the budget exhausts before the required
+      * depth is reached, the returned status is `Pending` — not `Confirmed`. The caller's timeout
+      * branch fires (e.g. `submitAndPoll` returns `Left`), which is the intended contract for a
+      * depth-aware poll.
+      *
+      * `confirmations` has no default here so this overload doesn't conflict with the inherited
+      * three-arg method's trait-supplied defaults (Scala disallows multiple defaulted overloads of
+      * the same method name).
+      */
+    final def pollForConfirmation(
+        txHash: TransactionHash,
+        maxAttempts: Int,
+        delayMs: Long,
+        confirmations: Int
     ): F[TransactionStatus] = liftFuture {
-        engine.backup match
-            case Some(bp: BlockchainProvider) =>
-                engine.txStatus(txHash).flatMap {
-                    case Some(status) => Future.successful(status)
-                    case None         => bp.pollForConfirmation(txHash, maxAttempts, delayMs)
-                }
-            case _ =>
-                // No tx-indexed backup; client-side poll via our own dispatching `checkTransaction`
-                // (which composes engine.txStatus → backup → localNode-mempool). Covers
-                // `BackupSource.LocalNode` and `NoBackup` uniformly.
-                pollLocally(txHash, maxAttempts, delayMs)
+        if confirmations > 0 then pollLocally(txHash, maxAttempts, delayMs, confirmations)
+        else
+            engine.backup match
+                case Some(bp: BlockchainProvider) =>
+                    engine.txStatus(txHash).flatMap {
+                        case Some(status) => Future.successful(status)
+                        case None         => bp.pollForConfirmation(txHash, maxAttempts, delayMs)
+                    }
+                case _ =>
+                    // No tx-indexed backup; client-side poll via our own dispatching
+                    // `checkTransaction` (which composes engine.txStatus → backup →
+                    // localNode-mempool). Covers `BackupSource.LocalNode` and `NoBackup` uniformly.
+                    pollLocally(txHash, maxAttempts, delayMs, 0)
     }
 
     private def pollLocally(
         txHash: TransactionHash,
         attemptsLeft: Int,
-        delayMs: Long
+        delayMs: Long,
+        confirmations: Int
     ): Future[TransactionStatus] = checkTransactionFuture(txHash).flatMap {
-        case status @ TransactionStatus.Confirmed => Future.successful(status)
-        case status if attemptsLeft <= 1          => Future.successful(status)
-        case _                                    =>
-            // ExecutionContext.parasitic doesn't schedule timers, but the per-step delay is
-            // typically short enough that Thread.sleep on the parasitic worker is acceptable;
-            // long-running polls block one EC thread per call, same as `pollForConfirmation`
-            // already did for backup-side polling.
-            Thread.sleep(delayMs)
-            pollLocally(txHash, attemptsLeft - 1, delayMs)
+        case TransactionStatus.Confirmed if confirmations <= 0 =>
+            Future.successful(TransactionStatus.Confirmed)
+        case TransactionStatus.Confirmed =>
+            engine.confirmationDepth(txHash).flatMap {
+                case Some(d) if d >= confirmations =>
+                    Future.successful(TransactionStatus.Confirmed)
+                case _ if attemptsLeft <= 1 =>
+                    // Confirmed at some shallower depth, but the required depth wasn't reached
+                    // within budget — report `Pending` so callers' timeout branches fire.
+                    Future.successful(TransactionStatus.Pending)
+                case _ =>
+                    sleepThenPoll(txHash, attemptsLeft, delayMs, confirmations)
+            }
+        case status if attemptsLeft <= 1 => Future.successful(status)
+        case _ => sleepThenPoll(txHash, attemptsLeft, delayMs, confirmations)
     }
+
+    private def sleepThenPoll(
+        txHash: TransactionHash,
+        attemptsLeft: Int,
+        delayMs: Long,
+        confirmations: Int
+    ): Future[TransactionStatus] =
+        BaseStreamProvider
+            .scheduledDelay(delayMs)
+            .flatMap(_ => pollLocally(txHash, attemptsLeft - 1, delayMs, confirmations))
 
     /** `checkTransaction` as a plain `Future` — needed by the local-side polling loop, which can't
       * see the effect wrapper `F`.
@@ -280,10 +328,30 @@ abstract class BaseStreamProvider[F[_], C[_]](
                 )
         }
 
+    /** Three-arg overload — overrides the [[scalus.cardano.node.BlockchainProviderTF]] method.
+      * Equivalent to `submitAndPoll(transaction, maxAttempts, delayMs, confirmations = 0)`.
+      */
     final def submitAndPoll(
         transaction: Transaction,
         maxAttempts: Int,
         delayMs: Long
+    ): F[Either[SubmitError, TransactionHash]] =
+        submitAndPoll(transaction, maxAttempts, delayMs, 0)
+
+    /** Submit + poll. When `confirmations > 0` the depth-aware local poll is used regardless of
+      * backup configuration (the backup-side poll has no concept of *our* depth). Returns
+      * `Right(hash)` iff the tx is confirmed at depth ≥ `confirmations` within the polling budget;
+      * `Left(NetworkSubmitError.ConnectionError("not confirmed, last status: …"))` otherwise. The
+      * Left carries no typed reject reason — that requires Blockfrost or N2C `LocalTxSubmission`.
+      *
+      * `confirmations` has no default here so this overload doesn't conflict with the inherited
+      * three-arg method's trait-supplied defaults.
+      */
+    final def submitAndPoll(
+        transaction: Transaction,
+        maxAttempts: Int,
+        delayMs: Long,
+        confirmations: Int
     ): F[Either[SubmitError, TransactionHash]] = liftFuture {
         def afterSubmit(
             submitFut: Future[Either[SubmitError, TransactionHash]],
@@ -292,8 +360,12 @@ abstract class BaseStreamProvider[F[_], C[_]](
             case l @ Left(_) => Future.successful(l)
             case Right(hash) =>
                 engine.notifySubmit(hash).flatMap { _ =>
-                    val poll = serverSidePoll
-                        .getOrElse((h: TransactionHash) => pollLocally(h, maxAttempts, delayMs))
+                    val poll: TransactionHash => Future[TransactionStatus] =
+                        if confirmations > 0 then
+                            h => pollLocally(h, maxAttempts, delayMs, confirmations)
+                        else
+                            serverSidePoll
+                                .getOrElse(h => pollLocally(h, maxAttempts, delayMs, 0))
                     poll(hash).map {
                         case TransactionStatus.Confirmed => Right(hash)
                         case other =>
@@ -324,4 +396,33 @@ abstract class BaseStreamProvider[F[_], C[_]](
 
     private def noBackupSubmitError: SubmitError =
         scalus.cardano.node.NetworkSubmitError.ConnectionError("no backup source configured")
+}
+
+object BaseStreamProvider {
+
+    /** Process-wide daemon scheduler used by [[pollLocally]] to release the EC thread during
+      * inter-attempt delays. Single thread is enough — it does only the wake-up; the woken
+      * continuation runs on the caller's EC via `Promise.future.flatMap`. Daemon so JVM exit isn't
+      * held up.
+      */
+    private lazy val pollScheduler: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { r =>
+            val t = new Thread(r, "scalus-stream-poll-scheduler")
+            t.setDaemon(true)
+            t
+        }
+
+    /** Non-blocking delay — returns a `Future[Unit]` that completes after `delayMs` without holding
+      * an EC thread. Replaces `Thread.sleep` inside the polling loop, which previously blocked one
+      * EC thread per long poll.
+      */
+    private def scheduledDelay(delayMs: Long): Future[Unit] = {
+        val p = Promise[Unit]()
+        val _ = pollScheduler.schedule(
+          new Runnable { def run(): Unit = { val _ = p.success(()) } },
+          delayMs,
+          TimeUnit.MILLISECONDS
+        )
+        p.future
+    }
 }
