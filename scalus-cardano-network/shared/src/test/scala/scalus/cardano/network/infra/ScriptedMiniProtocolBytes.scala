@@ -1,12 +1,12 @@
 package scalus.cardano.network.infra
 
 import io.bullet.borer.Encoder
-import scalus.cardano.infra.CancelToken
+import scalus.cardano.infra.{CancelToken, CancelledException}
 import scalus.serialization.cbor.Cbor
 import scalus.uplc.builtin.ByteString
 
 import scala.collection.mutable
-import scala.concurrent.{Future, Promise}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 
 /** Test double for [[MiniProtocolBytes]]: a scripted byte channel for driving mini-protocol state
   * machines in unit tests. Stage server replies with [[stage]] (CBOR-encoded via the scalus codec,
@@ -15,6 +15,10 @@ import scala.concurrent.{Future, Promise}
   *
   * Generic over the mini-protocol's message type — `LocalStateQueryDriverSuite` and
   * `LocalTxMonitorDriverSuite` share one instance shape.
+  *
+  * Cancel observance: a parked `receive` fails with [[CancelledException]] when its `CancelToken`
+  * fires — same shape as the production socket-backed `MiniProtocolBytes`. Tests that pass
+  * `CancelToken.never` (or omit the argument) get the pre-existing no-cancel behaviour for free.
   */
 final class ScriptedMiniProtocolBytes[M: Encoder] extends MiniProtocolBytes {
     private val lock = new AnyRef
@@ -30,6 +34,18 @@ final class ScriptedMiniProtocolBytes[M: Encoder] extends MiniProtocolBytes {
             else {
                 val p = Promise[Option[ByteString]]()
                 pending = Some(p)
+                // Observe cancel so a parked receive aborts when the token fires — matches the
+                // real socket-backed MiniProtocolBytes. `CancelToken.never.onCancel` is a no-op,
+                // so callers that pass it (the default) are unaffected.
+                val reg = cancel.onCancel { () =>
+                    val _ = p.tryFailure(CancelledException("receive cancelled"))
+                    lock.synchronized {
+                        if pending.contains(p) then pending = None
+                    }
+                }
+                // Deregister the listener when the Promise completes via `stage(...)` so a
+                // long-lived cancel source doesn't accumulate stale closures.
+                p.future.onComplete(_ => reg.cancel())(ExecutionContext.parasitic)
                 p.future
             }
         }
