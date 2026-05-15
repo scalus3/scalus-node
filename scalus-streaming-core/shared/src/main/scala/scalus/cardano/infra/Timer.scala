@@ -1,7 +1,9 @@
 package scalus.cardano.infra
 
+import java.util.concurrent.{Executors, ScheduledExecutorService, ScheduledFuture, TimeUnit}
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.util.control.NonFatal
 
 /** Handle to cancel a scheduled timer action or deregister a [[CancelToken.onCancel]] listener.
   * Idempotent — if the action has already run (or the listener already fired), calling [[cancel]]
@@ -62,5 +64,38 @@ trait Timer {
             p.future.onComplete(_ => listener.cancel())
         }
         p.future
+    }
+}
+
+object Timer {
+
+    /** Process-wide shared timer, backed by a single-thread daemon `ScheduledExecutorService`.
+      * Suitable as the default for any non-bench code that needs `Timer.sleep` / `Timer.schedule`
+      * without bringing in its own executor. JVM-side `JvmTimer.shared` is the canonical
+      * alternative when the caller wants the JVM-specific class for testability.
+      */
+    lazy val shared: Timer = new SharedTimer(defaultExecutor())
+
+    private def defaultExecutor(): ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { r =>
+            val t = new Thread(r, "scalus-shared-timer")
+            t.setDaemon(true)
+            t
+        }
+
+    private final class SharedTimer(executor: ScheduledExecutorService) extends Timer {
+        private val logger: scribe.Logger = scribe.Logger("scalus.cardano.infra.Timer")
+
+        def schedule(delay: FiniteDuration)(action: => Unit): Cancellable = {
+            val task: Runnable = () =>
+                try action
+                catch {
+                    case NonFatal(t) => logger.error("scheduled action threw", t)
+                }
+            val future: ScheduledFuture[?] =
+                executor.schedule(task, delay.toNanos, TimeUnit.NANOSECONDS)
+            () =>
+                val _ = future.cancel(false)
+        }
     }
 }

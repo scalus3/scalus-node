@@ -1,6 +1,7 @@
 package scalus.cardano.network.n2c.localtxsubmission
 
-import io.bullet.borer.{Decoder, Encoder, Reader, Tag, Writer}
+import io.bullet.borer.{Decoder, Encoder, Reader, Writer}
+import scalus.cardano.network.infra.HfcEnvelope
 import scalus.uplc.builtin.ByteString
 
 /** LocalTxSubmission mini-protocol messages (protocol id 6), per the ouroboros-network CDDL
@@ -66,11 +67,11 @@ object LocalTxSubmissionMessage {
         def write(w: Writer, m: LocalTxSubmissionMessage): Writer = m match {
             case MsgSubmitTx(era, txBytes) =>
                 w.writeArrayHeader(2).writeInt(0)
-                writeHfcEnvelope(w, era, txBytes)
+                HfcEnvelope.write(w, era, txBytes)
             case MsgAcceptTx => w.writeArrayHeader(1).writeInt(1)
             case MsgRejectTx(era, reason) =>
                 w.writeArrayHeader(2).writeInt(2)
-                writeHfcEnvelope(w, era, reason)
+                HfcEnvelope.write(w, era, reason)
             case MsgDone => w.writeArrayHeader(1).writeInt(3)
         }
 
@@ -79,11 +80,11 @@ object LocalTxSubmissionMessage {
             val arrLen = r.readArrayHeader().toInt
             r.readInt() match {
                 case 0 if arrLen == 2 =>
-                    val (era, bytes) = readHfcEnvelope(r)
+                    val (era, bytes) = HfcEnvelope.read(r)
                     MsgSubmitTx(era, bytes)
                 case 1 if arrLen == 1 => MsgAcceptTx
                 case 2 if arrLen == 2 =>
-                    val (era, bytes) = readHfcEnvelope(r)
+                    val (era, bytes) = HfcEnvelope.read(r)
                     MsgRejectTx(era, bytes)
                 case 3 if arrLen == 1 => MsgDone
                 case other =>
@@ -93,22 +94,4 @@ object LocalTxSubmissionMessage {
             }
         }
 
-    /** Write `[era, tag24(bytes)]` — same HFC envelope as the chain-sync `RollForward` payload. */
-    private def writeHfcEnvelope(w: Writer, era: Int, bytes: ByteString): Writer =
-        w.writeArrayHeader(2).writeInt(era).writeTag(Tag.EmbeddedCBOR).writeBytes(bytes.bytes)
-
-    private def readHfcEnvelope(r: Reader): (Int, ByteString) = {
-        val len = r.readArrayHeader().toInt
-        if len != 2 then r.validationFailure(s"unexpected HFC envelope arrLen=$len (expected 2)")
-        val era = r.readInt()
-        r.readTag() match {
-            case Tag.EmbeddedCBOR => ()
-            case other =>
-                r.validationFailure(
-                  s"expected CBOR tag 24 (EmbeddedCBOR) for HFC envelope inner, got $other"
-                )
-        }
-        val bytes = ByteString.fromArray(r.readByteArray())
-        (era, bytes)
-    }
 }

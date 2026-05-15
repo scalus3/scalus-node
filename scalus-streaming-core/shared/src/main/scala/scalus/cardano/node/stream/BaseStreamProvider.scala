@@ -1,12 +1,13 @@
 package scalus.cardano.node.stream
 
+import scalus.cardano.infra.Timer
 import scalus.cardano.ledger.{Block, CardanoInfo, DataHash, ProtocolParams, Transaction, TransactionHash, TransactionInput, TransactionOutput, Utxos}
 import scalus.cardano.node.{BlockchainProvider, BlockchainReader, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
 import scalus.uplc.builtin.Data
 import scalus.cardano.node.stream.engine.{Engine, Mailbox}
 
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.duration.DurationLong
+import scala.concurrent.{ExecutionContext, Future}
 
 /** Common implementation glue for streaming providers across adapters. All subscription plumbing
   * and snapshot-method fall-through lives here; concrete adapters only need to:
@@ -39,7 +40,8 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
   * happens-before (e.g. await a signal from the subscribe thread before submitting).
   */
 abstract class BaseStreamProvider[F[_], C[_]](
-    val engine: Engine
+    val engine: Engine,
+    val timer: Timer = Timer.shared
 )(using val mailboxSource: MailboxSource[C])
     extends BlockchainStreamProviderTF[F, C] {
 
@@ -319,8 +321,8 @@ abstract class BaseStreamProvider[F[_], C[_]](
         delayMs: Long,
         confirmations: Int
     ): Future[TransactionStatus] =
-        BaseStreamProvider
-            .scheduledDelay(delayMs)
+        timer
+            .sleep(delayMs.millis)
             .flatMap(_ => pollLocally(txHash, attemptsLeft - 1, delayMs, confirmations))
 
     /** `checkTransaction` as a plain `Future` — needed by the local-side polling loop, which can't
@@ -407,33 +409,4 @@ abstract class BaseStreamProvider[F[_], C[_]](
 
     private def noBackupSubmitError: SubmitError =
         scalus.cardano.node.NetworkSubmitError.ConnectionError("no backup source configured")
-}
-
-object BaseStreamProvider {
-
-    /** Process-wide daemon scheduler used by [[pollLocally]] to release the EC thread during
-      * inter-attempt delays. Single thread is enough — it does only the wake-up; the woken
-      * continuation runs on the caller's EC via `Promise.future.flatMap`. Daemon so JVM exit isn't
-      * held up.
-      */
-    private lazy val pollScheduler: ScheduledExecutorService =
-        Executors.newSingleThreadScheduledExecutor { r =>
-            val t = new Thread(r, "scalus-stream-poll-scheduler")
-            t.setDaemon(true)
-            t
-        }
-
-    /** Non-blocking delay — returns a `Future[Unit]` that completes after `delayMs` without holding
-      * an EC thread. Replaces `Thread.sleep` inside the polling loop, which previously blocked one
-      * EC thread per long poll.
-      */
-    private def scheduledDelay(delayMs: Long): Future[Unit] = {
-        val p = Promise[Unit]()
-        val _ = pollScheduler.schedule(
-          new Runnable { def run(): Unit = { val _ = p.success(()) } },
-          delayMs,
-          TimeUnit.MILLISECONDS
-        )
-        p.future
-    }
 }

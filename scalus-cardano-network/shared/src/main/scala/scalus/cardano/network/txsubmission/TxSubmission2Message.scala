@@ -1,6 +1,7 @@
 package scalus.cardano.network.txsubmission
 
-import io.bullet.borer.{Decoder, Encoder, Reader, Tag, Writer}
+import io.bullet.borer.{Decoder, Encoder, Reader, Writer}
+import scalus.cardano.network.infra.HfcEnvelope
 import scalus.uplc.builtin.ByteString
 
 /** TxSubmission2 mini-protocol messages (protocol id 4), per the ouroboros-network CDDL.
@@ -175,23 +176,10 @@ object TxSubmission2Message {
     }
 
     private def writeTxBody(w: Writer, body: TxBody): Writer =
-        w.writeArrayHeader(2)
-            .writeInt(body.era)
-            .writeTag(Tag.EmbeddedCBOR)
-            .writeBytes(body.txBytes.bytes)
+        HfcEnvelope.write(w, body.era, body.txBytes)
 
     private def readTxBody(r: Reader): TxBody = {
-        val len = r.readArrayHeader().toInt
-        if len != 2 then r.validationFailure(s"TxBody arrLen=$len (expected 2)")
-        val era = r.readInt()
-        r.readTag() match {
-            case Tag.EmbeddedCBOR => ()
-            case other =>
-                r.validationFailure(
-                  s"expected CBOR tag 24 (EmbeddedCBOR) inside TxBody, got $other"
-                )
-        }
-        val bytes = ByteString.fromArray(r.readByteArray())
+        val (era, bytes) = HfcEnvelope.read(r)
         TxBody(era, bytes)
     }
 }
