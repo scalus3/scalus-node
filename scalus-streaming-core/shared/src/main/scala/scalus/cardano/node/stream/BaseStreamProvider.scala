@@ -221,14 +221,25 @@ abstract class BaseStreamProvider[F[_], C[_]](
         }
     }
 
+    /** Routing precedence (highest first): `BlockchainProvider` (Blockfrost — typed reject), then
+      * `LocalNodeBackend` (N2C `LocalTxSubmission` — typed reject), then `N2nTxSubmissionBackend`
+      * (N2N `TxSubmission2` — no typed reject; result-level timeout via `submitAndPoll`), then
+      * `noBackupSubmitError`. See `n2n-txsubmission2-m8.md` § *Routing precedence*.
+      */
     def submit(transaction: Transaction): F[Either[SubmitError, TransactionHash]] =
         liftFuture {
-            engine.backup match
-                case Some(bp: BlockchainProvider) => notifyOnSubmit(bp.submit(transaction))
-                case _ =>
-                    engine.localNode match
-                        case Some(ln) => notifyOnSubmit(ln.submit(transaction))
-                        case None     => Future.successful(Left(noBackupSubmitError))
+            val viaBackup: Option[Future[Either[SubmitError, TransactionHash]]] =
+                engine.backup.collect { case bp: BlockchainProvider =>
+                    notifyOnSubmit(bp.submit(transaction))
+                }
+            val viaLocalNode: Option[Future[Either[SubmitError, TransactionHash]]] =
+                engine.localNode.map(ln => notifyOnSubmit(ln.submit(transaction)))
+            val viaN2nSubmit: Option[Future[Either[SubmitError, TransactionHash]]] =
+                engine.txSubmission.map(tx => notifyOnSubmit(tx.submit(transaction)))
+            viaBackup
+                .orElse(viaLocalNode)
+                .orElse(viaN2nSubmit)
+                .getOrElse(Future.successful(Left(noBackupSubmitError)))
         }
 
     /** Three-arg overload — overrides the [[scalus.cardano.node.BlockchainProviderTF]] method.

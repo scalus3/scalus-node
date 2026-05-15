@@ -2,7 +2,7 @@ package scalus.cardano.node.stream.engine
 
 import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, TransactionHash, TransactionInput, TransactionOutput, Utxo, Utxos}
 import scalus.cardano.node.{BlockchainReader, TransactionStatus, UtxoQuery, UtxoQueryError}
-import scalus.cardano.node.stream.{ChainPoint, ChainTip, LocalNodeBackend, StartFrom, UtxoEvent}
+import scalus.cardano.node.stream.{ChainPoint, ChainTip, LocalNodeBackend, N2nTxSubmissionBackend, StartFrom, UtxoEvent}
 import scalus.cardano.node.stream.engine.persistence.{AppliedBlockSummary, BucketDelta, BucketState, EnginePersistenceStore, EngineSnapshotFile, JournalRecord, PersistedEngineState}
 import scalus.uplc.builtin.Data
 
@@ -46,7 +46,8 @@ final class Engine(
     val chainStore: Option[ChainStore] = None,
     val localNode: Option[LocalNodeBackend] = None,
     val appId: String = "",
-    val networkMagic: Long = 0L
+    val networkMagic: Long = 0L,
+    val txSubmission: Option[N2nTxSubmissionBackend] = None
 ) {
 
     import Engine.UtxoSubscription
@@ -517,14 +518,17 @@ final class Engine(
         byKey.clear()
     }
 
-    /** Tear down resources owned by the backup slots. Today only [[LocalNodeBackend]] owns a
-      * connection (Unix-domain socket + mini-protocol drivers); the [[BlockchainReader]] backup
-      * (Blockfrost) is a stateless HTTP client and doesn't expose a `close`. Called from each
-      * flavor's provider shutdown path after `closeAllSubscribers`. Idempotent because
-      * `LocalNodeBackend.close` is.
+    /** Tear down resources owned by the backup slots. The [[LocalNodeBackend]] owns a connection
+      * (Unix-domain socket + mini-protocol drivers); the [[N2nTxSubmissionBackend]] owns its
+      * mini-protocol channel state. The [[BlockchainReader]] backup (Blockfrost) is a stateless
+      * HTTP client and doesn't expose a `close`. Called from each flavor's provider shutdown path
+      * after `closeAllSubscribers`. Idempotent because each backend's `close` is.
       */
-    def closeBackends()(using ExecutionContext): Future[Unit] =
-        localNode.fold(Future.unit)(_.close())
+    def closeBackends()(using ExecutionContext): Future[Unit] = {
+        val ln = localNode.fold(Future.unit)(_.close())
+        val tx = txSubmission.fold(Future.unit)(_.close())
+        ln.flatMap(_ => tx)
+    }
 
     /** Fail every subscriber with `cause` and clear the registries. Used by the chain-sync wiring
       * path when the applier's `done` future completes with an error (decode failure,
@@ -1085,7 +1089,8 @@ object Engine {
         chainStore: Option[ChainStore] = None,
         localNode: Option[LocalNodeBackend] = None,
         appId: String = "",
-        networkMagic: Long = 0L
+        networkMagic: Long = 0L,
+        txSubmission: Option[N2nTxSubmissionBackend] = None
     )(using scala.concurrent.ExecutionContext): Future[Engine] = {
         val engine = new Engine(
           cardanoInfo,
@@ -1096,7 +1101,8 @@ object Engine {
           chainStore,
           localNode,
           appId,
-          networkMagic
+          networkMagic,
+          txSubmission
         )
         engine.restoreInto(state).map(_ => engine)
     }

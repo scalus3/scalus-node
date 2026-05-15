@@ -7,6 +7,8 @@ import scalus.cardano.infra.{CancelToken, CancelledException}
 import scalus.cardano.ledger.{Transaction, TransactionHash}
 import scalus.cardano.network.infra.{CborMessageStream, MiniProtocolBytes, MiniProtocolId}
 import scalus.cardano.network.txsubmission.TxSubmission2Message.*
+import scalus.cardano.node.{NetworkSubmitError, SubmitError}
+import scalus.cardano.node.stream.N2nTxSubmissionBackend
 import scalus.uplc.builtin.ByteString
 
 import scala.collection.mutable
@@ -48,7 +50,8 @@ final class TxSubmission2Driver(
     cancelToken: CancelToken,
     submitEra: Int = TxSubmission2Driver.ConwayEra,
     logger: scribe.Logger = TxSubmission2Driver.defaultLogger
-)(using ec: ExecutionContext) {
+)(using ec: ExecutionContext)
+    extends N2nTxSubmissionBackend {
 
     import TxSubmission2Driver.QueuedTx
 
@@ -61,15 +64,19 @@ final class TxSubmission2Driver(
     private var newSubmitWaiters: mutable.ArrayBuffer[Promise[Unit]] = mutable.ArrayBuffer.empty
     @volatile private var closed: Boolean = false
 
-    /** Enqueue `transaction` for the peer to pull. The returned `TransactionHash` is the same
-      * `transaction.id`; the Future resolves immediately on enqueue (no peer-side acceptance signal
-      * exists). Fails only if the driver is already closed.
+    /** [[N2nTxSubmissionBackend.submit]]: enqueue `transaction` for the peer to pull. Returns
+      * `Right(transaction.id)` immediately on enqueue; `Left(ConnectionError)` only if the driver
+      * has been closed or the underlying connection is gone. No typed reject reason — the protocol
+      * doesn't carry one.
       */
-    def submit(transaction: Transaction): Future[TransactionHash] =
+    def submit(transaction: Transaction): Future[Either[SubmitError, TransactionHash]] =
         submitWire(
           transaction.id,
           ByteString.unsafeFromArray(Cbor.encode(transaction).toByteArray)
-        )
+        ).map(Right(_): Either[SubmitError, TransactionHash])
+            .recover { case t: IllegalStateException =>
+                Left(NetworkSubmitError.ConnectionError(t.getMessage))
+            }
 
     /** Wire-level submit — same effect as [[submit]] but takes the hash and pre-encoded CBOR
       * directly. Used by tests that want to exercise the protocol without constructing a full
@@ -99,14 +106,19 @@ final class TxSubmission2Driver(
     def pendingSubmissions: Seq[TransactionHash] =
         lock.synchronized(queue.iterator.map(_.hash).toSeq)
 
-    /** Mark the driver closed and unblock any waiting handlers. The loop ([[run]]) observes
-      * `closed` on the next iteration, sends `MsgDone` best-effort, and exits.
+    /** [[N2nTxSubmissionBackend.close]]: mark the driver closed and unblock any handlers waiting on
+      * a blocking `MsgRequestTxIds`. The mini-protocol channel is torn down separately when the
+      * `NodeToNodeConnection`'s root cancels — at which point [[run]]'s `done` future completes and
+      * the best-effort `MsgDone` is emitted on the way out. Idempotent.
       */
-    def close(): Unit = lock.synchronized {
-        if !closed then {
-            closed = true
-            wakeAllWaitersLocked()
+    def close(): Future[Unit] = {
+        lock.synchronized {
+            if !closed then {
+                closed = true
+                wakeAllWaitersLocked()
+            }
         }
+        Future.unit
     }
 
     /** Run the main loop. Returns a Future that completes when the loop exits. The caller (the

@@ -7,7 +7,7 @@ import org.scalatest.funsuite.AnyFunSuite
 import scalus.cardano.ledger.{CardanoInfo, DataHash, ProtocolParams, SlotNo, Transaction, TransactionHash, Utxos}
 import scalus.uplc.builtin.Data
 import scalus.cardano.node.{BlockchainProvider, NetworkSubmitError, SubmitError, TransactionStatus, UtxoQuery, UtxoQueryError, UtxoSource}
-import scalus.cardano.node.stream.{StartFrom, SubscriptionOptions, SyntheticEventSource, UtxoEvent, UtxoEventQuery}
+import scalus.cardano.node.stream.{N2nTxSubmissionBackend, StartFrom, SubscriptionOptions, SyntheticEventSource, UtxoEvent, UtxoEventQuery}
 import scalus.cardano.node.stream.engine.{Engine, EngineTestFixtures}
 import scalus.cardano.node.stream.fs2.{Fs2BlockchainStreamProvider, Fs2ScalusAsyncStream}
 
@@ -126,6 +126,39 @@ class BackupDelegationSuite extends AnyFunSuite {
                 assert(addr == addressA)
             case other => fail(s"expected NotFound(FromAddress), got $other")
         }
+    }
+
+    test("submit falls through to N2nTxSubmissionBackend when no Blockfrost or LocalNode") {
+        given ExecutionContext = ExecutionContext.global
+        val hash = txHash(700)
+        val submittedTxs = scala.collection.mutable.ArrayBuffer.empty[Transaction]
+        val n2nStub: N2nTxSubmissionBackend = new N2nTxSubmissionBackend {
+            override def submit(
+                tx: Transaction
+            ): Future[Either[SubmitError, TransactionHash]] = {
+                submittedTxs += tx
+                Future.successful(Right(hash))
+            }
+            override def close(): Future[Unit] = Future.unit
+        }
+        val output: Either[SubmitError, TransactionHash] = Dispatcher
+            .parallel[IO]
+            .use { d =>
+                given Dispatcher[IO] = d
+                given ExecutionContext = ExecutionContext.global
+                val provider = new Fs2BlockchainStreamProvider(
+                  new Engine(
+                    ci,
+                    None,
+                    Engine.DefaultSecurityParam,
+                    txSubmission = Some(n2nStub)
+                  )
+                ) with SyntheticEventSource[IO, IOStream]
+                provider.submit(Transaction.empty)
+            }
+            .unsafeRunSync()
+        assert(output == Right(hash))
+        assert(submittedTxs.size == 1)
     }
 
     test("NoBackup: submit returns a typed ConnectionError") {
